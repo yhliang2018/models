@@ -137,25 +137,17 @@ def parse_record(raw_record, is_training):
 
   Returns:
     Tuple with processed image tensor and one-hot-encoded label tensor.
-"""
-  image, label, bbox = _parse_example_proto(raw_record)
-
-  # Decode the string as an RGB JPEG.
-  # Note that the resulting image contains an unknown height and width
-  # that is set dynamically by decode_jpeg. In other words, the height
-  # and width of image is unknown at compile-time.
-  # Results in a 3-D int8 Tensor. This will be converted to a float later,
-  # during resizing.
-  image = tf.image.decode_jpeg(image, channels=_NUM_CHANNELS)
+  """
+  image_buffer, label, bbox = _parse_example_proto(raw_record)
 
   image = vgg_preprocessing.preprocess_image(
-      image=image,
+      image_buffer=image_buffer,
       bbox=bbox,
       output_height=_DEFAULT_IMAGE_SIZE,
       output_width=_DEFAULT_IMAGE_SIZE,
       is_training=is_training)
 
-  label = tf.one_hot(label, _NUM_CLASSES)
+  label = tf.one_hot(tf.reshape(label, shape=[]), _NUM_CLASSES)
 
   return image, label
 
@@ -190,9 +182,15 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1,
   # Convert to individual records
   dataset = dataset.flat_map(tf.data.TFRecordDataset)
 
-  return resnet.process_record_dataset(dataset, is_training, batch_size,
-      _SHUFFLE_BUFFER, parse_record, num_epochs, num_parallel_calls,
-      examples_per_epoch=num_images, multi_gpu=multi_gpu)
+  return resnet.process_record_dataset(
+      dataset, is_training, batch_size, _SHUFFLE_BUFFER, parse_record,
+      num_epochs, num_parallel_calls, examples_per_epoch=num_images,
+      multi_gpu=multi_gpu)
+
+
+def get_synth_input_fn():
+  return resnet.get_synth_input_fn(
+        _DEFAULT_IMAGE_SIZE, _DEFAULT_IMAGE_SIZE, _NUM_CHANNELS, _NUM_CLASSES)
 
 
 ###############################################################################
@@ -277,7 +275,8 @@ def imagenet_model_fn(features, labels, mode, params):
 
 
 def main(unused_argv):
-  resnet.resnet_main(FLAGS, imagenet_model_fn, input_fn)
+  input_function = FLAGS.use_synthetic_data and get_synth_input_fn() or input_fn
+  resnet.resnet_main(FLAGS, imagenet_model_fn, input_function)
 
 
 if __name__ == '__main__':

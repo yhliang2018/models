@@ -38,33 +38,29 @@ _R_MEAN = 123.68
 _G_MEAN = 116.78
 _B_MEAN = 103.94
 
-_RESIZE_SIDE_MIN = 256
-_RESIZE_SIDE_MAX = 512
+# The lower bound for the smallest side of the image for aspect-preserving
+# resizing. For example, if an image is 500 x 1000, it will be resized to
+# _RESIZE_MIN x (_RESIZE_MIN * 2).
+_RESIZE_MIN = 256
 
 
-def _get_h_w(image):
-  """Convenience for grabbing the height and width of an image.
-  """
-  shape = tf.shape(image)
-  return shape[0], shape[1]
-
-
-def _random_crop_and_flip(image, bbox, crop_height, crop_width):
+def _decode_crop_and_flip(image_buffer, bbox):
   """Crops the given image to a random part of the image, and randomly flips.
 
+  We use the fused decode_and_crop op, which performs better than the two ops
+  used separately in series, but note that this requires that the image be
+  passed in as an un-decoded string Tensor.
+
   Args:
-    image: a 3-D image tensor
+    image_buffer: scalar string Tensor representing the raw JPEG image buffer.
     bbox: 3-D float Tensor of bounding boxes arranged [1, num_boxes, coords]
       where each coordinate is [0, 1) and the coordinates are arranged as
       [ymin, xmin, ymax, xmax].
-    crop_height: the new height.
-    crop_width: the new width.
 
   Returns:
     3-D tensor with cropped image.
 
   """
-
   # A large fraction of image datasets contain a human-annotated bounding box
   # delineating the region of the image containing the object of interest.  We
   # choose to create a new bounding box for the object which is a randomly
@@ -73,7 +69,7 @@ def _random_crop_and_flip(image, bbox, crop_height, crop_width):
   # bounding box. If no box is supplied, then we assume the bounding box is
   # the entire image.
   sample_distorted_bounding_box = tf.image.sample_distorted_bounding_box(
-      tf.image.extract_jpeg_shape(image),
+      tf.image.extract_jpeg_shape(image_buffer),
       bounding_boxes=bbox,
       min_object_covered=0.1,
       aspect_ratio_range=[0.75, 1.33],
@@ -82,13 +78,20 @@ def _random_crop_and_flip(image, bbox, crop_height, crop_width):
       use_image_if_no_bounding_boxes=True)
   bbox_begin, bbox_size, _ = sample_distorted_bounding_box
 
-  cropped = tf.slice(image, bbox_begin, bbox_size)
+  # Reassemble the bounding box in the format the crop op requires.
+  offset_y, offset_x, _ = tf.unstack(bbox_begin)
+  target_height, target_width, _ = tf.unstack(bbox_size)
+  crop_window = tf.stack([offset_y, offset_x, target_height, target_width])
 
+  # Use the fused decode and crop op here, which is faster than each in series.
+  cropped = tf.image.decode_and_crop_jpeg(image_buffer, crop_window, channels=3)
+
+  # Flip to add a little more random distortion in.
   cropped = tf.image.random_flip_left_right(cropped)
   return cropped
 
 
-def _central_crop(image, bbox, crop_height, crop_width):
+def _central_crop(image, crop_height, crop_width):
   """Performs central crops of the given image list.
 
   Args:
@@ -99,12 +102,13 @@ def _central_crop(image, bbox, crop_height, crop_width):
   Returns:
     3-D tensor with cropped image.
   """
-  height, width = _get_h_w(image)
+  shape = tf.shape(image)
+  height, width = shape[0], shape[1]
 
-  total_crop_height = (height - crop_height)
-  crop_top = total_crop_height // 2
-  total_crop_width = (width - crop_width)
-  crop_left = total_crop_width // 2
+  amount_to_be_cropped_h = (height - crop_height)
+  crop_top = amount_to_be_cropped_h // 2
+  amount_to_be_cropped_w = (width - crop_width)
+  crop_left = amount_to_be_cropped_w // 2
   return tf.slice(
       image, [crop_top, crop_left, 0], [crop_height, crop_width, -1])
 
@@ -142,7 +146,7 @@ def _mean_image_subtraction(image, means):
   return image - means
 
 
-def _smallest_size_at_least(height, width, smallest_side):
+def _smallest_size_at_least(height, width, resize_min):
   """Computes new shape with the smallest side equal to `smallest_side`.
 
   Computes new shape with the smallest side equal to `smallest_side` while
@@ -151,56 +155,74 @@ def _smallest_size_at_least(height, width, smallest_side):
   Args:
     height: an int32 scalar tensor indicating the current height.
     width: an int32 scalar tensor indicating the current width.
-    smallest_side: A python integer or scalar `Tensor` indicating the size of
+    resize_min: A python integer or scalar `Tensor` indicating the size of
       the smallest side after resize.
 
   Returns:
     new_height: an int32 scalar tensor indicating the new height.
     new_width: an int32 scalar tensor indicating the new width.
   """
-  smallest_side = tf.cast(smallest_side, tf.float32)
+  resize_min = tf.cast(resize_min, tf.float32)
 
-  height = tf.cast(height, tf.float32)
-  width = tf.cast(width, tf.float32)
+  # Convert to floats to make subsequent calculations go smoothly.
+  height, width = tf.cast(height, tf.float32), tf.cast(width, tf.float32)
 
   smaller_dim = tf.minimum(height, width)
-  scale_ratio = smallest_side / smaller_dim
+  scale_ratio = resize_min / smaller_dim
+
+  # Convert back to ints to make heights and widths that TF ops will accept.
   new_height = tf.cast(height * scale_ratio, tf.int32)
   new_width = tf.cast(width * scale_ratio, tf.int32)
 
   return new_height, new_width
 
 
-def _aspect_preserving_resize(image, smallest_side):
+def _aspect_preserving_resize(image, resize_min):
   """Resize images preserving the original aspect ratio.
 
   Args:
     image: A 3-D image `Tensor`.
-    smallest_side: A python integer or scalar `Tensor` indicating the size of
+    resize_min: A python integer or scalar `Tensor` indicating the size of
       the smallest side after resize.
 
   Returns:
     resized_image: A 3-D tensor containing the resized image.
   """
-  smallest_side = tf.convert_to_tensor(smallest_side, dtype=tf.int32)
+  shape = tf.shape(image)
+  height, width = shape[0], shape[1]
 
-  height, width = _get_h_w(image)
-  new_height, new_width = _smallest_size_at_least(height, width, smallest_side)
+  new_height, new_width = _smallest_size_at_least(height, width, resize_min)
 
-  resized_image = tf.image.resize_images(
-      image, [new_height, new_width], method=tf.image.ResizeMethod.BILINEAR,
-      align_corners=False)
-  return resized_image
+  return _resize_image(image, new_height, new_width)
 
 
-def preprocess_image(image, bbox, output_height, output_width,
-                     is_training=False,
-                     resize_side_min=_RESIZE_SIDE_MIN,
-                     resize_side_max=_RESIZE_SIDE_MAX):
-  """Preprocesses the given image.
+def _resize_image(image, height, width):
+  """Simple wrapper around tf.resize_images to make sure we use the same
+  `method` and other details each time.
 
   Args:
-    image: A `Tensor` representing an image of arbitrary size.
+    image: A 3-D image `Tensor`.
+    height: The target height for the resized image.
+    width: The target width for the resized image.
+
+  Returns:
+    resized_image: A 3-D tensor containing the resized image. The first two
+      dimensions have the shape [height, width].
+  """
+  return tf.image.resize_images(
+      image, [height, width], method=tf.image.ResizeMethod.BILINEAR,
+      align_corners=False)
+
+def preprocess_image(image_buffer, bbox, output_height, output_width,
+                     is_training=False):
+  """Preprocesses the given image.
+
+  Preprocessing includes decoding, cropping, and resizing for both training
+  and eval images. Training preprocessing, however, introduces some random
+  distortion of the image to improve accuracy.
+
+  Args:
+    image_buffer: scalar string Tensor representing the raw JPEG image buffer.
     bbox: 3-D float Tensor of bounding boxes arranged [1, num_boxes, coords]
       where each coordinate is [0, 1) and the coordinates are arranged as
       [ymin, xmin, ymax, xmax].
@@ -208,30 +230,21 @@ def preprocess_image(image, bbox, output_height, output_width,
     output_width: The width of the image after preprocessing.
     is_training: `True` if we're preprocessing the image for training and
       `False` otherwise.
-    resize_side_min: The lower bound for the smallest side of the image for
-      aspect-preserving resizing. If `is_training` is `False`, then this value
-      is used for rescaling.
-    resize_side_max: The upper bound for the smallest side of the image for
-      aspect-preserving resizing. If `is_training` is `False`, this value is
-      ignored. Otherwise, the resize side is sampled from
-        [resize_size_min, resize_size_max].
 
   Returns:
     A preprocessed image.
   """
   if is_training:
     # For training, we want to randomize some of the distortions.
-    resize_side = tf.random_uniform(
-        [], minval=resize_side_min, maxval=resize_side_max + 1, dtype=tf.int32)
-    crop_fn = _random_crop_and_flip
+    image = _decode_crop_and_flip(image_buffer, bbox)
+    image = _resize_image(image, output_height, output_width)
   else:
-    resize_side = resize_side_min
-    crop_fn = _central_crop
+    # For validation, we want to decode, resize, then just crop the middle.
+    image = tf.image.decode_jpeg(image_buffer, channels=3)
+    image = _aspect_preserving_resize(image, _RESIZE_MIN)
+    image = _central_crop(image, output_height, output_width)
 
   num_channels = image.get_shape().as_list()[-1]
-  image = _aspect_preserving_resize(image, resize_side)
-  image = crop_fn(image, bbox, output_height, output_width)
-
   image.set_shape([output_height, output_width, num_channels])
 
   image = tf.cast(image, tf.float32)
