@@ -21,6 +21,12 @@ import argparse
 import shutil
 import sys
 
+# Hack code until a more formal solution is decided.
+import os
+_ROOT = os.path.abspath(__file__).split("models/official")[0] + "models"
+if _ROOT not in sys.path: sys.path.append(_ROOT)
+
+import official.utils.arg_parsers
 import tensorflow as tf
 
 _CSV_COLUMNS = [
@@ -32,34 +38,6 @@ _CSV_COLUMNS = [
 
 _CSV_COLUMN_DEFAULTS = [[0], [''], [0], [''], [0], [''], [''], [''], [''], [''],
                         [0], [0], [0], [''], ['']]
-
-parser = argparse.ArgumentParser()
-
-parser.add_argument(
-    '--model_dir', type=str, default='/tmp/census_model',
-    help='Base directory for the model.')
-
-parser.add_argument(
-    '--model_type', type=str, default='wide_deep',
-    help="Valid model types: {'wide', 'deep', 'wide_deep'}.")
-
-parser.add_argument(
-    '--train_epochs', type=int, default=40, help='Number of training epochs.')
-
-parser.add_argument(
-    '--epochs_per_eval', type=int, default=2,
-    help='The number of training epochs to run between evaluations.')
-
-parser.add_argument(
-    '--batch_size', type=int, default=40, help='Number of examples per batch.')
-
-parser.add_argument(
-    '--train_data', type=str, default='/tmp/census_data/adult.data',
-    help='Path to the training data.')
-
-parser.add_argument(
-    '--test_data', type=str, default='/tmp/census_data/adult.test',
-    help='Path to the test data.')
 
 _NUM_EXAMPLES = {
     'train': 32561,
@@ -195,6 +173,26 @@ def input_fn(data_file, num_epochs, shuffle, batch_size):
   return dataset
 
 
+class WideDeepArgParser(official.utils.arg_parsers.BaseParser):
+  def __init__(self):
+    super(WideDeepArgParser, self).__init__()
+
+    self._add_location_args(data=True, separate_train_val=True, model=True)
+    self._add_supervised_args(train_epochs=True, epochs_per_eval=True,
+                              batch_size=True)
+    self._shortcut_add(str, 'model_type', "mdl", default="wide_deep",
+                       choices=["wide", "deep", "wide_deep"],
+                       help_text="Specify model topology.")
+    self.set_defaults(
+        model_dir="/tmp/census_model",
+        train_epochs=40,
+        epochs_per_eval=2,
+        batch_size=40,
+        train_loc='/tmp/census_data/adult.data',
+        val_loc='/tmp/census_data/adult.test'
+    )
+
+
 def main(unused_argv):
   # Clean up the model directory if present
   shutil.rmtree(FLAGS.model_dir, ignore_errors=True)
@@ -203,10 +201,10 @@ def main(unused_argv):
   # Train and evaluate the model every `FLAGS.epochs_per_eval` epochs.
   for n in range(FLAGS.train_epochs // FLAGS.epochs_per_eval):
     model.train(input_fn=lambda: input_fn(
-        FLAGS.train_data, FLAGS.epochs_per_eval, True, FLAGS.batch_size))
+        FLAGS.train_loc, FLAGS.epochs_per_eval, True, FLAGS.batch_size))
 
     results = model.evaluate(input_fn=lambda: input_fn(
-        FLAGS.test_data, 1, False, FLAGS.batch_size))
+        FLAGS.val_loc, 1, False, FLAGS.batch_size))
 
     # Display evaluation metrics
     print('Results at epoch', (n + 1) * FLAGS.epochs_per_eval)
@@ -217,6 +215,7 @@ def main(unused_argv):
 
 
 if __name__ == '__main__':
+  parser = WideDeepArgParser()
   tf.logging.set_verbosity(tf.logging.INFO)
-  FLAGS, unparsed = parser.parse_known_args()
-  tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
+  FLAGS = parser.parse_args()
+  tf.app.run(main=main, argv=sys.argv[:1])
