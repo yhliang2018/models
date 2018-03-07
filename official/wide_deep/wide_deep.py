@@ -17,12 +17,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import argparse
+import os
 import shutil
 import sys
 
 # Hack code until a more formal solution is decided.
-import os
 _ROOT = os.path.abspath(__file__).split("models/official")[0] + "models"
 if _ROOT not in sys.path: sys.path.append(_ROOT)
 
@@ -174,17 +173,20 @@ def input_fn(data_file, num_epochs, shuffle, batch_size):
 
 
 class WideDeepArgParser(official.utils.arg_parsers.BaseParser):
+  """Argument parser for wide-deep model.
+  """
+
   def __init__(self):
     super(WideDeepArgParser, self).__init__()
 
     self._add_location_args(data=True, separate_train_val=True, model=True)
     self._add_supervised_args(train_epochs=True, epochs_per_eval=True,
                               batch_size=True)
-    self._shortcut_add(str, 'model_type', "mdl", default="wide_deep",
-                       choices=["wide", "deep", "wide_deep"],
-                       help_text="Specify model topology.")
+    self._shortcut_add(str, 'model_type', 'mdl', default='wide_deep',
+                       choices=['wide', 'deep', 'wide_deep'],
+                       help_text='Specify model topology.')
     self.set_defaults(
-        model_dir="/tmp/census_model",
+        model_dir='/tmp/census_model',
         train_epochs=40,
         epochs_per_eval=2,
         batch_size=40,
