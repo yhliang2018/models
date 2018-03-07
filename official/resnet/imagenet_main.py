@@ -158,12 +158,12 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1,
 ###############################################################################
 class ImagenetModel(resnet.Model):
 
-  def __init__(self, resnet_size, data_format=None, num_classes=_NUM_CLASSES):
+  def __init__(self, resnet_size, channel_format=None, num_classes=_NUM_CLASSES):
     """These are the parameters that work for Imagenet data.
 
     Args:
       resnet_size: The number of convolutional layers needed in the model.
-      data_format: Either 'channels_first' or 'channels_last', specifying which
+      channel_format: Either 'channels_first' or 'channels_last', specifying which
         data format to use when setting up the model.
       num_classes: The number of output classes needed from the model. This
         enables users to extend the same model to their own datasets.
@@ -191,7 +191,7 @@ class ImagenetModel(resnet.Model):
         block_sizes=_get_block_sizes(resnet_size),
         block_strides=[1, 2, 2, 2],
         final_size=final_size,
-        data_format=data_format)
+        channel_format=channel_format)
 
 
 def _get_block_sizes(resnet_size):
@@ -229,7 +229,7 @@ def imagenet_model_fn(features, labels, mode, params):
                                 weight_decay=1e-4,
                                 learning_rate_fn=learning_rate_fn,
                                 momentum=0.9,
-                                data_format=params['data_format'],
+                                channel_format=params['channel_format'],
                                 loss_filter_fn=None,
                                 multi_gpu=params['multi_gpu'])
 
