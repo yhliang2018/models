@@ -37,6 +37,7 @@ import tensorflow as tf
 _R_MEAN = 123.68
 _G_MEAN = 116.78
 _B_MEAN = 103.94
+_CHANNEL_MEANS = [_R_MEAN, _G_MEAN, _B_MEAN]
 
 # The lower bound for the smallest side of the image for aspect-preserving
 # resizing. For example, if an image is 500 x 1000, it will be resized to
@@ -44,7 +45,7 @@ _B_MEAN = 103.94
 _RESIZE_MIN = 256
 
 
-def _decode_crop_and_flip(image_buffer, bbox):
+def _decode_crop_and_flip(image_buffer, bbox, num_channels):
   """Crops the given image to a random part of the image, and randomly flips.
 
   We use the fused decode_and_crop op, which performs better than the two ops
@@ -56,6 +57,7 @@ def _decode_crop_and_flip(image_buffer, bbox):
     bbox: 3-D float Tensor of bounding boxes arranged [1, num_boxes, coords]
       where each coordinate is [0, 1) and the coordinates are arranged as
       [ymin, xmin, ymax, xmax].
+    num_channels: Integer depth of the image buffer for decoding.
 
   Returns:
     3-D tensor with cropped image.
@@ -84,7 +86,8 @@ def _decode_crop_and_flip(image_buffer, bbox):
   crop_window = tf.stack([offset_y, offset_x, target_height, target_width])
 
   # Use the fused decode and crop op here, which is faster than each in series.
-  cropped = tf.image.decode_and_crop_jpeg(image_buffer, crop_window, channels=3)
+  cropped = tf.image.decode_and_crop_jpeg(
+      image_buffer, crop_window, channels=num_channels)
 
   # Flip to add a little more random distortion in.
   cropped = tf.image.random_flip_left_right(cropped)
@@ -113,7 +116,7 @@ def _central_crop(image, crop_height, crop_width):
       image, [crop_top, crop_left, 0], [crop_height, crop_width, -1])
 
 
-def _mean_image_subtraction(image, means):
+def _mean_image_subtraction(image, means, num_channels):
   """Subtracts the given means from each image channel.
 
   For example:
@@ -125,6 +128,7 @@ def _mean_image_subtraction(image, means):
   Args:
     image: a tensor of size [height, width, C].
     means: a C-vector of values to subtract from each channel.
+    num_channels: number of color channels in the image that will be distorted.
 
   Returns:
     the centered image.
@@ -136,7 +140,7 @@ def _mean_image_subtraction(image, means):
   """
   if image.get_shape().ndims != 3:
     raise ValueError('Input must be of size [height, width, C>0]')
-  num_channels = image.get_shape().as_list()[-1]
+
   if len(means) != num_channels:
     raise ValueError('len(means) must match the number of channels')
 
@@ -214,7 +218,7 @@ def _resize_image(image, height, width):
       align_corners=False)
 
 def preprocess_image(image_buffer, bbox, output_height, output_width,
-                     is_training=False):
+                     num_channels, is_training=False):
   """Preprocesses the given image.
 
   Preprocessing includes decoding, cropping, and resizing for both training
@@ -228,6 +232,7 @@ def preprocess_image(image_buffer, bbox, output_height, output_width,
       [ymin, xmin, ymax, xmax].
     output_height: The height of the image after preprocessing.
     output_width: The width of the image after preprocessing.
+    num_channels: Integer depth of the image buffer for decoding.
     is_training: `True` if we're preprocessing the image for training and
       `False` otherwise.
 
@@ -240,12 +245,10 @@ def preprocess_image(image_buffer, bbox, output_height, output_width,
     image = _resize_image(image, output_height, output_width)
   else:
     # For validation, we want to decode, resize, then just crop the middle.
-    image = tf.image.decode_jpeg(image_buffer, channels=3)
+    image = tf.image.decode_jpeg(image_buffer, channels=num_channels)
     image = _aspect_preserving_resize(image, _RESIZE_MIN)
     image = _central_crop(image, output_height, output_width)
 
-  num_channels = image.get_shape().as_list()[-1]
   image.set_shape([output_height, output_width, num_channels])
 
-  image = tf.cast(image, tf.float32)
-  return _mean_image_subtraction(image, [_R_MEAN, _G_MEAN, _B_MEAN])
+  return _mean_image_subtraction(image, _CHANNEL_MEANS, num_channels)

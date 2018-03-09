@@ -145,6 +145,7 @@ def parse_record(raw_record, is_training):
       bbox=bbox,
       output_height=_DEFAULT_IMAGE_SIZE,
       output_width=_DEFAULT_IMAGE_SIZE,
+      num_channels=_NUM_CHANNELS,
       is_training=is_training)
 
   label = tf.one_hot(tf.reshape(label, shape=[]), _NUM_CLASSES)
