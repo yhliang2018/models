@@ -21,6 +21,7 @@ The convolutional block applies the following modules:
   1. A convolution of num_filter filters of kernel size 3 x 3 with stride 1
   2. Batch normalization
   3. A rectifier non-linearity
+
 Each residual block applies the following modules sequentially to its input:
   1. A convolution of num_filter filters of kernel size 3 x 3 with stride 1
   2. Batch normalization
@@ -29,6 +30,7 @@ Each residual block applies the following modules sequentially to its input:
   5. Batch normalization
   6. A skip connection that adds the input to the block
   7. A rectifier non-linearity
+
 Note: num_filter is 128 for 19 x 19 board size, and 32 for 9 x 9 board size.
 
 The output of the residual tower is passed into two separate "heads" for
@@ -37,8 +39,8 @@ following modules:
   1. A convolution of 2 filters of kernel size 1 x 1 with stride 1
   2. Batch normalization
   3. A rectifier non-linearity
-  4. A fully connected linear layer that outputs a vector of size 19^2 + 1 = 362
-  corresponding to logit probabilities for all intersections and the pass move
+  4. A fully connected linear layer that outputs a vector of size (board_size * board_size + 1) corresponding to logit probabilities for all intersections and the pass move
+
 The value head applies the following modules:
   1. A convolution of 1 filter of kernel size 1 x 1 with stride 1
   2. Batch normalization
