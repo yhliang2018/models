@@ -5,12 +5,14 @@ MiniGo is a minimalist Go engine modeled after AlphaGo Zero, built on MuGo. The 
 
 This implementation maintains the features of model training and validation, and also provides evaluation of two Go models.
 
+
+## DualNet Model
 The input to the neural network is a [board_size * board_size * 17] image stack
 comprising 17 binary feature planes. 8 feature planes consist of binary values
 indicating the presence of the current player's stones; A further 8 feature
 planes represent the corresponding features for the opponent's stones; The final
 feature plane represents the color to play, and has a constant value of either 1
-if black is to play or 0 if white to play. Check 'features.py' for more details.
+if black is to play or 0 if white to play. Check `features.py` for more details.
 
 In MiniGo implementation, the input features are processed by a residual tower
 that consists of a single convolutional block followed by either 9 or 19
@@ -50,7 +52,6 @@ The value head applies the following modules:
 The overall network depth, in the 10 or 20 block network, is 19 or 39
 parameterized layers respectively for the residual tower, plus an additional 2
 layers for the policy head and 3 layers for the value head.
-
 
 ## Getting Started
 Please follow the [instructions](https://github.com/tensorflow/minigo/blob/master/README.md#getting-started) in original Minigo repo to set up the environment.
