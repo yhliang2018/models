@@ -28,103 +28,109 @@ import tensorflow as tf
 # pylint: enable=g-bad-import-order
 
 from official.deep_speech import deep_speech_model
+from official.deep_speech import dataset
 from official.utils.export import export
 from official.utils.flags import core as flags_core
 from official.utils.logs import hooks_helper
 from official.utils.logs import logger
 from official.utils.misc import model_helpers
 
-def evaluate_model(estimator, labels, targets, input_fn_eval):
-  """Model evaluation with HR and NDCG metrics.
+# def evaluate_model(estimator, labels, targets, input_fn_eval):
+#   """Model evaluation with HR and NDCG metrics.
 
-  The evaluation protocol is to rank the test interacted item (truth items)
-  among the randomly chosen 100 items that are not interacted by the user.
-  The performance of the ranked list is judged by Hit Ratio (HR) and Normalized
-  Discounted Cumulative Gain (NDCG).
+#   The evaluation protocol is to rank the test interacted item (truth items)
+#   among the randomly chosen 100 items that are not interacted by the user.
+#   The performance of the ranked list is judged by Hit Ratio (HR) and Normalized
+#   Discounted Cumulative Gain (NDCG).
 
-  For evaluation, the ranked list is truncated at 10 for both metrics. As such,
-  the HR intuitively measures whether the test item is present on the top-10
-  list, and the NDCG accounts for the position of the hit by assigning higher
-  scores to hits at top ranks. Both metrics are calculated for each test user,
-  and the average scores are reported.
+#   For evaluation, the ranked list is truncated at 10 for both metrics. As such,
+#   the HR intuitively measures whether the test item is present on the top-10
+#   list, and the NDCG accounts for the position of the hit by assigning higher
+#   scores to hits at top ranks. Both metrics are calculated for each test user,
+#   and the average scores are reported.
 
-  Args:
-    estimator: The Estimator.
-    batch_size: An integer, the batch size specified by user.
-    num_gpus: An integer, the number of gpus specified by user.
-    ncf_dataset: An NCFDataSet object, which contains the information about
-      test/eval dataset, such as:
-      eval_true_items, which is a list of test items (true items) for HR and
-        NDCG calculation. Each item is for one user.
-      eval_all_items, which is a nested list. Each entry is the 101 items
-        (1 ground truth item and 100 negative items) for one user.
+#   Args:
+#     estimator: The Estimator.
+#     batch_size: An integer, the batch size specified by user.
+#     num_gpus: An integer, the number of gpus specified by user.
+#     ncf_dataset: An NCFDataSet object, which contains the information about
+#       test/eval dataset, such as:
+#       eval_true_items, which is a list of test items (true items) for HR and
+#         NDCG calculation. Each item is for one user.
+#       eval_all_items, which is a nested list. Each entry is the 101 items
+#         (1 ground truth item and 100 negative items) for one user.
 
-  Returns:
-    eval_results: A dict of evaluation results for benchmark logging.
-      eval_results = {
-        _HR_KEY: hr,
-        _NDCG_KEY: ndcg,
-        tf.GraphKeys.GLOBAL_STEP: global_step
-      }
-      where hr is an integer indicating the average HR scores across all users,
-      ndcg is an integer representing the average NDCG scores across all users,
-      and global_step is the global step
-  """
-  # Get predictions
-  predictions = estimator.predict(input_fn=input_fn_eval)
-  predicted_logits = [p["logits"] for p in predictions]
+#   Returns:
+#     eval_results: A dict of evaluation results for benchmark logging.
+#       eval_results = {
+#         _HR_KEY: hr,
+#         _NDCG_KEY: ndcg,
+#         tf.GraphKeys.GLOBAL_STEP: global_step
+#       }
+#       where hr is an integer indicating the average HR scores across all users,
+#       ndcg is an integer representing the average NDCG scores across all users,
+#       and global_step is the global step
+#   """
+#   # Get predictions
+#   predictions = estimator.predict(input_fn=input_fn_eval)
+#   predicted_logits = [p["logits"] for p in predictions]
 
-  # (decoded_dense, log_prob)
-  decoded_output = tf.keras.backend.ctc_decode(predicted_logits, seq_lens)
+#   # (decoded_dense, log_prob)
+#   decoded_output = tf.keras.backend.ctc_decode(predicted_logits, seq_lens)
 
-  decoder = DeepSpeechDecoder(labels)
-  decoded_strings = decoder.decode(decoded_output[1])
-  target_strings = decoder.decode(targets) # targets should be a list of numeric sequences
+#   decoder = DeepSpeechDecoder(labels)
+#   decoded_strings = decoder.decode(decoded_output[1])
+#   target_strings = decoder.decode(targets) # targets should be a list of numeric sequences
 
-  # WER and CER
-  total_wer, total_cer = 0, 0
-  wer, cer = 0, 0
-  for x in range(len(target_strings)):
-    wer += decoder.wer(decoded_output[x], target_strings[x]) / float(len(target_strings[x].split()))
-    cer += decoder.cer(decoded_output[x], target_strings[x]) / float(len(target_strings[x]))
-  total_cer += cer
-  total_wer += wer
-
-  hits, ndcgs = [], []
-  num_users = len(ncf_dataset.eval_true_items)
-  # Reshape the predicted scores and each user takes one row
-  predicted_scores_list = np.asarray(
-      all_predicted_scores).reshape(num_users, -1)
-
-  for i in range(num_users):
-    items = ncf_dataset.eval_all_items[i]
-    predicted_scores = predicted_scores_list[i]
-    # Map item and score for each user
-    map_item_score = {}
-    for j, item in enumerate(items):
-      score = predicted_scores[j]
-      map_item_score[item] = score
-
-    # Evaluate top rank list with HR and NDCG
-    ranklist = heapq.nlargest(_TOP_K, map_item_score, key=map_item_score.get)
-    true_item = ncf_dataset.eval_true_items[i]
-    hr = _get_hr(ranklist, true_item)
-    ndcg = _get_ndcg(ranklist, true_item)
-    hits.append(hr)
-    ndcgs.append(ndcg)
-
-  # Get average HR and NDCG scores
-  hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
-  global_step = estimator.get_variable_value(tf.GraphKeys.GLOBAL_STEP)
-  eval_results = {
-      _HR_KEY: hr,
-      _NDCG_KEY: ndcg,
-      tf.GraphKeys.GLOBAL_STEP: global_step
-  }
-  return eval_results
+#   # WER and CER
+#   total_wer, total_cer = 0, 0
+#   for i, data in enumerate(test_loader)
+#     inputs, targets, input_percentages, target_sizes = data
+#     wer, cer = 0, 0
+#     target_lens = len(target_strings)
+#     for x in range(target_lens):
+#       wer += decoder.wer(decoded_output[x], target_strings[x]) / float(len(target_strings[x].split()))
+#       cer += decoder.cer(decoded_output[x], target_strings[x]) / float(len(target_strings[x]))
+#     total_cer += cer
+#     total_wer += wer
 
 
-def convert_keras_to_estimator(keras_model, num_gpus, labels, model_dir):
+
+#   hits, ndcgs = [], []
+#   num_users = len(ncf_dataset.eval_true_items)
+#   # Reshape the predicted scores and each user takes one row
+#   predicted_scores_list = np.asarray(
+#       all_predicted_scores).reshape(num_users, -1)
+
+#   for i in range(num_users):
+#     items = ncf_dataset.eval_all_items[i]
+#     predicted_scores = predicted_scores_list[i]
+#     # Map item and score for each user
+#     map_item_score = {}
+#     for j, item in enumerate(items):
+#       score = predicted_scores[j]
+#       map_item_score[item] = score
+
+#     # Evaluate top rank list with HR and NDCG
+#     ranklist = heapq.nlargest(_TOP_K, map_item_score, key=map_item_score.get)
+#     true_item = ncf_dataset.eval_true_items[i]
+#     hr = _get_hr(ranklist, true_item)
+#     ndcg = _get_ndcg(ranklist, true_item)
+#     hits.append(hr)
+#     ndcgs.append(ndcg)
+
+#   # Get average HR and NDCG scores
+#   hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
+#   global_step = estimator.get_variable_value(tf.GraphKeys.GLOBAL_STEP)
+#   eval_results = {
+#       _HR_KEY: hr,
+#       _NDCG_KEY: ndcg,
+#       tf.GraphKeys.GLOBAL_STEP: global_step
+#   }
+#   return eval_results
+
+
+def convert_keras_to_estimator(keras_model, num_gpus, model_dir):
   """Configure and convert keras model to Estimator.
 
   Args:
@@ -135,28 +141,13 @@ def convert_keras_to_estimator(keras_model, num_gpus, labels, model_dir):
   Returns:
     est_model: The converted Estimator.
   """
-  # Define CTC loss
-  def _ctc_lambda_func(y_pred, labels, input_length, label_length):
-    return tf.keras.backend.ctc_batch_cost(
-        labels, y_pred, input_length, label_length)
-
-  def _ctc_loss(y_true, y_pred):
-    # Input of labels and other CTC requirements
-    labels = Input(name="the_labels", shape=[None,], dtype="int32")
-    input_length = Input(name="input_length", shape=[1], dtype="int32")
-    label_length = Input(name="label_length", shape=[1], dtype="int32")
-
-    # Keras doesn"t currently support loss funcs with extra parameters
-    # so CTC loss is implemented in a lambda layer
-    loss = Lambda(_ctc_lambda_func, output_shape=(1,), name="ctc")(
-        [y_pred, labels, input_length, label_length])
-    return loss
-
   optimizer = tf.keras.optimizers.SGD(
-      lr=flags_obj.lr, momentum=flags_obj.momentum, decay=flags_obj.l2,
+      lr=flags_obj.learning_rate, momentum=flags_obj.momentum, decay=flags_obj.l2,
       nesterov=True)
+  # print(optimizer)
 
-  keras_model.compile(optimizer=optimizer, loss=_ctc_loss)
+  keras_model.compile(optimizer=optimizer, loss={"ctc": lambda y_true, y_pred: y_pred})
+  print("keras model: ", keras_model)
 
   if num_gpus == 0:
     distribution = tf.contrib.distribute.OneDeviceStrategy("device:CPU:0")
@@ -213,23 +204,31 @@ def run_deep_speech(_):
   """Run deep speech training and eval loop."""
   # Data preprocessing
   # The file name of training and test dataset
-
   tf.logging.info("Data preprocessing...")
+  audio_conf = dataset.AudioConfig(16000, 25, 10)
+  data_conf = dataset.DatasetConfig(audio_conf, "", "",
+                            "test-clean.2.csv",
+                            "vocabulary.txt")
+  data_set = dataset.DeepSpeechDataset(data_conf)
+  print(data_set.test_features[0].shape)
+  # feat_len = len(data_set.test_features)
+  # print(feat_len)
 
 # Create deep speech model and convert it to Estimator
   tf.logging.info("Creating Estimator from Keras model...")
-  with open(flags_obj.labels_path) as label_file:
-    labels = str("".join(json.load(label_file)))
-  num_classes = len(labels)
+  num_classes = len(data_set.speech_labels)
+
+  input_shape = (875, 257, 1)
 
   keras_model = deep_speech_model.DeepSpeech2(
-      input_dim, flags_obj.num_rnn_layers, flags_obj.rnn_type,
+      input_shape, flags_obj.rnn_hidden_layers, flags_obj.rnn_type,
       flags_obj.is_bidirectional, flags_obj.rnn_hidden_size,
       flags_obj.rnn_activation, num_classes, flags_obj.use_bias)
 
-  num_gpus = flags_core.get_num_gpus(FLAGS)
+  num_gpus = flags_core.get_num_gpus(flags_obj)
   estimator = convert_keras_to_estimator(
       keras_model, num_gpus, flags_obj.model_dir)
+  print("estimator", estimator)
 
   # Benchmark logging
   run_params = {
@@ -253,32 +252,27 @@ def run_deep_speech(_):
       batch_size=flags_obj.batch_size)
 
   def input_fn_train():
-    return input_function(
-        is_training=True, data_dir=flags_obj.data_dir,
-        batch_size=per_device_batch_size(
-            flags_obj.batch_size, flags_core.get_num_gpus(flags_obj)),
-        num_epochs=flags_obj.epochs_between_evals,
-        num_gpus=flags_core.get_num_gpus(flags_obj))
+    return dataset.input_fn(
+        True, per_device_batch_size(flags_obj.batch_size, num_gpus),
+        data_set)
 
   def input_fn_eval():
-    return input_function(
-        is_training=False, data_dir=flags_obj.data_dir,
-        batch_size=per_device_batch_size(
-            flags_obj.batch_size, flags_core.get_num_gpus(flags_obj)),
-        num_epochs=1)
+    return dataset.input_fn(
+        True, per_device_batch_size(flags_obj.batch_size, num_gpus),
+        data_set)
 
   total_training_cycle = (flags_obj.train_epochs //
                           flags_obj.epochs_between_evals)
   for cycle_index in range(total_training_cycle):
     tf.logging.info("Starting a training cycle: %d/%d",
-                    cycle_index, total_training_cycle)
+                    cycle_index + 1, total_training_cycle)
 
     estimator.train(input_fn=input_fn_train, hooks=train_hooks)
 
-    tf.logging.info("Starting to evaluate.")
+    # tf.logging.info("Starting to evaluate.")
 
-    eval_results = evaluate_model(
-        estimator, labels, input_fn=input_fn_eval)
+    # eval_results = evaluate_model(
+    #     estimator, labels, input_fn=input_fn_eval)
 
     benchmark_logger.log_evaluation_result(eval_results)
 
@@ -292,6 +286,8 @@ def run_deep_speech(_):
         shape, batch_size=flags_obj.batch_size)
     classifier.export_savedmodel(flags_obj.export_dir, input_receiver_fn)
 
+  # Clear the session explicitly to avoid session delete error
+  tf.keras.backend.clear_session()
 
 def define_deep_speech_flags():
   """Add flags for run_deep_speech."""
@@ -309,11 +305,11 @@ def define_deep_speech_flags():
   flags.adopt_module_key_flags(flags_core)
 
   flags_core.set_defaults(
-      model_dir="/tmp/deep_speech/model/",
-      data_dir="/tmp/deep_speech/data/",
-      export_dir="/tmp/deep_speech/saved_model/",
+      model_dir="/tmp/deep_speech_model/",
+      data_dir="/tmp/deep_speech_data/",
+      export_dir="/tmp/deep_speech_saved_model/",
       train_epochs=10,
-      batch_size=5,
+      batch_size=1,
       hooks="ProfilerHook")
 
   # Add deep_speech-specific flags
@@ -330,6 +326,11 @@ def define_deep_speech_flags():
       name="use_bias", default=True,
       help=flags_core.help_wrap(
           "Use bias"))
+
+  flags.DEFINE_bool(
+      name="is_bidirectional", default=True,
+      help=flags_core.help_wrap(
+          "If rnn unit is bidirectional"))
 
   flags.DEFINE_enum(
       name="rnn_type", default="gru",
