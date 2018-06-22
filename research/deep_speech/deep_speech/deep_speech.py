@@ -205,23 +205,28 @@ def run_deep_speech(_):
   # Data preprocessing
   # The file name of training and test dataset
   tf.logging.info("Data preprocessing...")
-  audio_conf = dataset.AudioConfig(16000, 25, 10)
-  data_conf = dataset.DatasetConfig(audio_conf, "", "",
-                            "test-clean.2.csv",
-                            "vocabulary.txt")
+  sample_rate = 16000
+  frame_length = 25
+  frame_step = 10
+  audio_conf = dataset.AudioConfig(sample_rate, frame_length, frame_step)
+  data_conf = dataset.DatasetConfig(
+      audio_conf,
+      "test-clean.1.csv",
+      "vocabulary.txt"
+  )
   data_set = dataset.DeepSpeechDataset(data_conf)
-  print(data_set.test_features[0].shape)
   # feat_len = len(data_set.test_features)
   # print(feat_len)
 
 # Create deep speech model and convert it to Estimator
   tf.logging.info("Creating Estimator from Keras model...")
   num_classes = len(data_set.speech_labels)
+  print("speech_labels", data_set.speech_labels)
 
-  input_shape = (875, 257, 1)
+  input_shape = (None, 257, 1)
 
   keras_model = deep_speech_model.DeepSpeech2(
-      input_shape, flags_obj.rnn_hidden_layers, flags_obj.rnn_type,
+      sample_rate, frame_length/1000, input_shape, flags_obj.rnn_hidden_layers, flags_obj.rnn_type,
       flags_obj.is_bidirectional, flags_obj.rnn_hidden_size,
       flags_obj.rnn_activation, num_classes, flags_obj.use_bias)
 
@@ -253,7 +258,7 @@ def run_deep_speech(_):
 
   def input_fn_train():
     return dataset.input_fn(
-        True, per_device_batch_size(flags_obj.batch_size, num_gpus),
+        True, 1,
         data_set)
 
   def input_fn_eval():
