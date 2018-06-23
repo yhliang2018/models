@@ -95,6 +95,7 @@ def _ctc_lambda_func(args):
   print("label_length", label_length)
   # y_pred = y_pred[:, 2:, :]
   print("in ctc lambda")
+
   return tf.keras.backend.ctc_batch_cost(
       labels, y_pred, input_length, label_length)
 
@@ -106,7 +107,7 @@ def ctc(y_true, y_pred):
 class DeepSpeech2(tf.keras.models.Model):
   """DeepSpeech 2 model."""
 
-  def __init__(self, sample_rate, window_size, input_shape, num_rnn_layers, rnn_type, is_bidirectional,
+  def __init__(self, input_shape, num_rnn_layers, rnn_type, is_bidirectional,
                rnn_hidden_size, rnn_activation, num_classes, use_bias):
     """Initialize DeepSpeech2 model.
 
@@ -134,11 +135,12 @@ class DeepSpeech2(tf.keras.models.Model):
     conv_layer_2 = _conv_bn_layer(
         conv_layer_1, filters=32, kernel_size=(21, 11), strides=(2, 1),
         layer_id=2)
-    print("conv_layer_2", conv_layer_2)  # batch_size (N), times (T), features (T), channels (N)
+    print("conv_layer_2", conv_layer_2)  # batch_size (N), times (T), features (F), channels (C)
 
     # Five bidirectional GRU layers
     shapes = conv_layer_2.shape
     rnn_input = tf.keras.layers.Reshape([shapes[1], shapes[2] * shapes[3]])(conv_layer_2)
+    # rnn_input = tf.keras.layers.Permute((1, 0))(rnn_input)
     # Based on above convolutions and spectrogram size using conv formula (W - F + 2P)/ S+1
     # rnn_input_size = int(math.floor((sample_rate * window_size) / 2) + 1)
     # rnn_input_size = int(math.floor(rnn_input_size - 41) / 2 + 1)
@@ -166,15 +168,16 @@ class DeepSpeech2(tf.keras.models.Model):
         num_classes, activation="softmax", use_bias=use_bias, name="y_pred")(fc_input)
     print("y_pred", y_pred)
 
-    labels = tf.keras.layers.Input(name="labels", shape=[None], dtype="int32")
+    labels = tf.keras.layers.Input(name="labels", shape=[None,], dtype="int32")
     input_length = tf.keras.layers.Input(name="input_length", shape=[1], dtype="int32")
     label_length = tf.keras.layers.Input(name="label_length", shape=[1], dtype="int32")
 
     # Keras doesn"t currently support loss funcs with extra parameters
     # so CTC loss is implemented in a lambda layer
-    ctc = tf.keras.layers.Lambda(_ctc_lambda_func, output_shape=(1,), name="ctc")(
+    loss_out = tf.keras.layers.Lambda(_ctc_lambda_func, output_shape=(1,), name="ctc")(
         [y_pred, labels, input_length, label_length])
+    # loss_out = tf.keras.layers.Permute((1, 0, 2))(loss_out)
 
-    print("ctc", ctc)
+    print("loss_out", loss_out)
 
-    super(DeepSpeech2, self).__init__(inputs=[input_data, labels, input_length, label_length], outputs=[ctc])
+    super(DeepSpeech2, self).__init__(inputs=[input_data, labels, input_length, label_length], outputs=loss_out)

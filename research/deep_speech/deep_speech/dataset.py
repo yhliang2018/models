@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import math
 from absl import app as absl_app
 from featurizer import AudioFeaturizer
 from featurizer import TextFeaturizer
@@ -146,12 +147,13 @@ def input_fn(training, batch_size, deep_speech_dataset, repeat=1):
   """
   features = deep_speech_dataset.features
   labels = deep_speech_dataset.labels
-  for i in range(len(features)):
-      feature = np.expand_dims(features[i], axis=2)
-      print("features", feature.shape)
-      print("labels", labels[i])
-      print("input_length", feature.shape[0])
-      print("label_length", len(labels[i]))
+  # for i in range(len(features)):
+  #     feature = np.expand_dims(features[i], axis=2)
+  #     # feature = features[i]
+  #     print("features", feature.shape)
+  #     print("labels", labels[i])
+  #     print("input_length", feature.shape[0])
+  #     print("label_length", len(labels[i]))
 
 
   def _data_gen():
@@ -159,42 +161,32 @@ def input_fn(training, batch_size, deep_speech_dataset, repeat=1):
       feature = np.expand_dims(features[i], axis=2)
       # input_length = np.expand_dims(feature.shape[0], axis=1)
       # label_length = np.expand_dims(len(labels[i]), axis=1)
-      input_length = feature.shape[0]
-      label_length = len(labels[i])
+      # feature = features[i]
+      input_length = [199]
+      label_length = [len(labels[i])]
       yield ({
           "features": feature,
           "labels": labels[i],
-          "input_length": [219],  # A list with one number
-          "label_length": [162]
+          "input_length": input_length,  # A list with one number
+          "label_length": label_length
       })
 
   dataset = tf.data.Dataset.from_generator(
       generator=_data_gen,
-      # output_types={tf.float32, tf.int8, tf.int8, tf.int8),
       output_types = {
           "features": tf.float32,
-          "labels": tf.int8,
-          "input_length": tf.int8,
-          "label_length": tf.int8
-      },
-      output_shapes={
-          "features": tf.TensorShape([875, 257, 1]),
-          "labels": tf.TensorShape([None]),
-          "input_length": tf.TensorShape([1]),
-          "label_length": tf.TensorShape([1])
-      }
-  )
-  print("before padding dataset", dataset)
-  # dataset = dataset.batch(batch_size)
+          "labels": tf.int32,
+          "input_length": tf.int32,
+          "label_length": tf.int32
+      })
   dataset = dataset.padded_batch(
       batch_size=batch_size,
       padded_shapes={
-          "features": tf.TensorShape([None, 257, 1]),
-          "labels": tf.TensorShape([None]),
-          "input_length": tf.TensorShape([1]),
-          "label_length": tf.TensorShape([1])
-      }
-  )
+          "features": (tf.Dimension(None), 257, 1),
+          "labels": tf.Dimension(None),
+          "input_length": tf.Dimension(None),
+          "label_length": tf.Dimension(None)
+      })
   print("after padding dataset", dataset)
   """
   if training:
@@ -222,6 +214,8 @@ def input_fn(training, batch_size, deep_speech_dataset, repeat=1):
   dataset = dataset.repeat(repeat)
   dataset = dataset.prefetch(1)
 
+  print("before return", dataset.output_shapes)
+
   return dataset
 
 
@@ -233,11 +227,83 @@ def main(_):
       "vocabulary.txt"
   )
   data_set = DeepSpeechDataset(data_conf)
-  dataset_input_fn = input_fn(True, 2, data_set)
+  # dataset_input_fn = input_fn(True, 2, data_set)
   # print("dataset from input_fn: ", dataset_input_fn)
 
-  print(len(data_set.features))
-  print(len(data_set.labels[0]))
+  data = data_set.features
+  labels = data_set.labels
+  # print("feature length", len(data))
+  # print("label length", len(labels))
+
+  for i in range(len(data)):
+      feature = np.expand_dims(data[i], axis=2)
+      print("feature", feature.shape)
+      # print("features", feature.shape)
+      # print("labels", labels[i])
+      input_length = feature.shape[0]
+      label_length = len(labels[i])
+      # print("input_length", input_length)
+      # print("label_length", label_length)
+
+
+  def _data_gen():
+    for i in range(len(data)):
+      feature = np.expand_dims(data[i], axis=2)
+      # feature = data[i]
+      # input_length = np.expand_dims(feature.shape[0], axis=1)
+      # label_length = np.expand_dims(len(labels[i]), axis=1)
+      input_length = [199]
+      label_length = [len(labels[i])]
+      print("input_length", input_length)
+      print("label_length", label_length)
+      yield ({
+          "features": feature,
+          "labels": labels[i],
+          "input_length": input_length,
+          "label_length": label_length
+      })
+
+
+  print("In Session:")
+  g = tf.Graph()
+  with tf.Session(graph=g).as_default() as sess, g.as_default():
+    batch_size = 2
+    dataset = tf.data.Dataset.from_generator(generator=_data_gen, output_types = {
+            "features": tf.float32,
+            "labels": tf.int32,
+            "input_length": tf.int32,
+            "label_length": tf.int32
+        })
+    dataset = dataset.padded_batch(batch_size=batch_size, padded_shapes={
+            "features": (tf.Dimension(None), 257, 1),
+            "labels": tf.Dimension(None),
+            "input_length": tf.Dimension(None),
+            "label_length": tf.Dimension(None)
+        })
+       # tf.Dimension(None), tf.Dimension(None)))
+    # dataset = dataset.repeat(1)
+    # dataset = dataset.prefetch(1)
+    print("before return", dataset.output_shapes)
+
+    ds_it = dataset.make_one_shot_iterator()
+    print("ds_it", ds_it)
+    row = ds_it.get_next()
+    print("row", row)
+    for i in range(math.ceil(len(data)/batch_size)):
+      x = sess.run(row)
+      print(x)
+      # x = sess.run(row["input_length"])
+      # print("input_length", x)
+      # x = sess.run(row["label_length"])
+      # print("label_length", x)
+      # if i % 10 == 0:
+      print(i, x)
+    print("done")
+
+
+
+  # print(len(data_set.features))
+  # print(len(data_set.labels[0]))
 
   # sess = tf.Session()
   # for feature in data_set.features:

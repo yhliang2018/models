@@ -211,24 +211,27 @@ def run_deep_speech(_):
   audio_conf = dataset.AudioConfig(sample_rate, frame_length, frame_step)
   data_conf = dataset.DatasetConfig(
       audio_conf,
-      "test-clean.1.csv",
+      "test-clean.2.csv",
       "vocabulary.txt"
   )
   data_set = dataset.DeepSpeechDataset(data_conf)
   # feat_len = len(data_set.test_features)
-  # print(feat_len)
+  print("features", data_set.features[0].shape)
+  print("labels", len(data_set.labels[0]))
 
 # Create deep speech model and convert it to Estimator
   tf.logging.info("Creating Estimator from Keras model...")
   num_classes = len(data_set.speech_labels)
   print("speech_labels", data_set.speech_labels)
 
-  input_shape = (None, 257, 1)
+  input_shape = (875, 257, 1)
 
   keras_model = deep_speech_model.DeepSpeech2(
-      sample_rate, frame_length/1000, input_shape, flags_obj.rnn_hidden_layers, flags_obj.rnn_type,
+      input_shape, flags_obj.rnn_hidden_layers, flags_obj.rnn_type,
       flags_obj.is_bidirectional, flags_obj.rnn_hidden_size,
       flags_obj.rnn_activation, num_classes, flags_obj.use_bias)
+
+  print(keras_model.summary(line_length=100))
 
   num_gpus = flags_core.get_num_gpus(flags_obj)
   estimator = convert_keras_to_estimator(
@@ -315,7 +318,7 @@ def define_deep_speech_flags():
       export_dir="/tmp/deep_speech_saved_model/",
       train_epochs=10,
       batch_size=1,
-      hooks="ProfilerHook")
+      hooks="")
 
   # Add deep_speech-specific flags
   # RNN related flags
