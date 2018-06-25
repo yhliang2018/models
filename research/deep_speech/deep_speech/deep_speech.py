@@ -35,99 +35,31 @@ from official.utils.logs import hooks_helper
 from official.utils.logs import logger
 from official.utils.misc import model_helpers
 
-# def evaluate_model(estimator, labels, targets, input_fn_eval):
-#   """Model evaluation with HR and NDCG metrics.
+def evaluate_model(estimator, labels, targets, input_fn_eval):
 
-#   The evaluation protocol is to rank the test interacted item (truth items)
-#   among the randomly chosen 100 items that are not interacted by the user.
-#   The performance of the ranked list is judged by Hit Ratio (HR) and Normalized
-#   Discounted Cumulative Gain (NDCG).
+  # Get predictions
+  predictions = estimator.predict(input_fn=input_fn_eval, yield_single_examples=False)
 
-#   For evaluation, the ranked list is truncated at 10 for both metrics. As such,
-#   the HR intuitively measures whether the test item is present on the top-10
-#   list, and the NDCG accounts for the position of the hit by assigning higher
-#   scores to hits at top ranks. Both metrics are calculated for each test user,
-#   and the average scores are reported.
+  y_preds = []
+  input_lengths= []
+  for p in predictions:
+    y_pred = p["y_pred"]
+    y_preds.append(y_pred)
+    input_length = p["ctc_input_length"]
+    input_lengths.append(input_length)
 
-#   Args:
-#     estimator: The Estimator.
-#     batch_size: An integer, the batch size specified by user.
-#     num_gpus: An integer, the number of gpus specified by user.
-#     ncf_dataset: An NCFDataSet object, which contains the information about
-#       test/eval dataset, such as:
-#       eval_true_items, which is a list of test items (true items) for HR and
-#         NDCG calculation. Each item is for one user.
-#       eval_all_items, which is a nested list. Each entry is the 101 items
-#         (1 ground truth item and 100 negative items) for one user.
+  for i in range(len(y_preds)):
+    y_pred_tensor = tf.convert_to_tensor(y_preds[i])
+    # input_length_tensor = tf.convert_to_tensor(input_lengths[i])
+    input_length_tensor = tf.squeeze(input_lengths[i],axis=1)
+    print("i: ", i)
+    print("y_pred_tensor", y_pred_tensor)
+    print("input_length_tensor", input_length_tensor)
 
-#   Returns:
-#     eval_results: A dict of evaluation results for benchmark logging.
-#       eval_results = {
-#         _HR_KEY: hr,
-#         _NDCG_KEY: ndcg,
-#         tf.GraphKeys.GLOBAL_STEP: global_step
-#       }
-#       where hr is an integer indicating the average HR scores across all users,
-#       ndcg is an integer representing the average NDCG scores across all users,
-#       and global_step is the global step
-#   """
-#   # Get predictions
-#   predictions = estimator.predict(input_fn=input_fn_eval)
-#   predicted_logits = [p["logits"] for p in predictions]
+    decoded_output = tf.keras.backend.ctc_decode(y_pred_tensor, input_length_tensor)
+    print("decoded output")
+    print(decoded_output)
 
-#   # (decoded_dense, log_prob)
-#   decoded_output = tf.keras.backend.ctc_decode(predicted_logits, seq_lens)
-
-#   decoder = DeepSpeechDecoder(labels)
-#   decoded_strings = decoder.decode(decoded_output[1])
-#   target_strings = decoder.decode(targets) # targets should be a list of numeric sequences
-
-#   # WER and CER
-#   total_wer, total_cer = 0, 0
-#   for i, data in enumerate(test_loader)
-#     inputs, targets, input_percentages, target_sizes = data
-#     wer, cer = 0, 0
-#     target_lens = len(target_strings)
-#     for x in range(target_lens):
-#       wer += decoder.wer(decoded_output[x], target_strings[x]) / float(len(target_strings[x].split()))
-#       cer += decoder.cer(decoded_output[x], target_strings[x]) / float(len(target_strings[x]))
-#     total_cer += cer
-#     total_wer += wer
-
-
-
-#   hits, ndcgs = [], []
-#   num_users = len(ncf_dataset.eval_true_items)
-#   # Reshape the predicted scores and each user takes one row
-#   predicted_scores_list = np.asarray(
-#       all_predicted_scores).reshape(num_users, -1)
-
-#   for i in range(num_users):
-#     items = ncf_dataset.eval_all_items[i]
-#     predicted_scores = predicted_scores_list[i]
-#     # Map item and score for each user
-#     map_item_score = {}
-#     for j, item in enumerate(items):
-#       score = predicted_scores[j]
-#       map_item_score[item] = score
-
-#     # Evaluate top rank list with HR and NDCG
-#     ranklist = heapq.nlargest(_TOP_K, map_item_score, key=map_item_score.get)
-#     true_item = ncf_dataset.eval_true_items[i]
-#     hr = _get_hr(ranklist, true_item)
-#     ndcg = _get_ndcg(ranklist, true_item)
-#     hits.append(hr)
-#     ndcgs.append(ndcg)
-
-#   # Get average HR and NDCG scores
-#   hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
-#   global_step = estimator.get_variable_value(tf.GraphKeys.GLOBAL_STEP)
-#   eval_results = {
-#       _HR_KEY: hr,
-#       _NDCG_KEY: ndcg,
-#       tf.GraphKeys.GLOBAL_STEP: global_step
-#   }
-#   return eval_results
 
 
 def convert_keras_to_estimator(keras_model, num_gpus, model_dir):
