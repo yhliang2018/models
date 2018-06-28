@@ -18,7 +18,6 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import time
 # pylint: disable=g-bad-import-order
 from absl import app as absl_app
 from absl import flags
@@ -26,15 +25,74 @@ import tensorflow as tf
 # pylint: enable=g-bad-import-order
 
 import data.dataset as dataset
+import decoder
 import deep_speech_model
 from official.utils.flags import core as flags_core
 from official.utils.logs import hooks_helper
 from official.utils.logs import logger
 from official.utils.misc import distribution_utils
+from official.utils.misc import model_helpers
 
 # Default vocabulary file
 _VOCABULARY_FILE = os.path.join(
     os.path.dirname(__file__), "data/vocabulary.txt")
+# Evaluation metrics
+_WER_KEY = "WER"
+_CER_KEY = "CER"
+
+
+def evaluate_model(estimator, batch_size, speech_labels, targets, input_fn_eval):
+  """Evaluate the model performance using WER(word error rate) and
+  CER(character error rate) as metrics.
+  Args:
+    estimator: estimator to evaluate.
+    batch_size: size of a mini-batch.
+    speech_labels: a string specifying all the character in the vocabulary.
+    targets: a list of list of integers for the featurized transcript.
+    input_fn_eval: data input function for evaluation.
+  Returns:
+    Evaluation result containing 'wer' and 'cer' as two metrics.
+  """
+  # Get predictions
+  predictions = estimator.predict(input_fn=input_fn_eval, yield_single_examples=False)
+
+  y_preds = []
+  input_lengths= []
+  for p in predictions:
+    y_preds.append(p["y_pred"])
+    input_lengths.append(p["ctc_input_length"])
+
+  num_of_examples = len(targets)
+  total_wer, total_cer = 0, 0
+  greedy_decoder = decoder.GreedyDecoder(speech_labels)
+  for i in range(len(y_preds)):
+    # Compute the CER and WER for the current batch,
+    # and aggregate to total_cer, total_wer.
+    y_pred_tensor = tf.convert_to_tensor(y_preds[i])
+    batch_targets = targets[i*batch_size : (i+1)*batch_size]
+    seq_len = tf.squeeze(input_lengths[i],axis=1)
+    # First decode.
+    decoded_strings, decoded_output = greedy_decoder.decode(y_pred_tensor, seq_len)
+    # print("Decoded strings")
+    # print(decoded_strings)
+    # Compute CER.
+    batch_cer = greedy_decoder.batch_cer(decoded_output, batch_targets)
+    total_cer += batch_cer
+    # Compute WER.
+    batch_wer = greedy_decoder.batch_wer(decoded_output, batch_targets)
+    total_wer += batch_wer
+
+  total_cer /= num_of_examples
+  total_wer /= num_of_examples
+
+  global_step = estimator.get_variable_value(tf.GraphKeys.GLOBAL_STEP)
+  eval_results = {
+      _WER_KEY: total_wer,
+      _CER_KEY: total_cer,
+      tf.GraphKeys.GLOBAL_STEP: global_step,
+  }
+
+  return eval_results
 
 
 def convert_keras_to_estimator(keras_model, num_gpus):
@@ -83,22 +141,12 @@ def generate_dataset(data_dir):
 
 def run_deep_speech(_):
   """Run deep speech training and eval loop."""
-  # Get number of GPUs
-  num_gpus = flags_core.get_num_gpus(flags_obj)
   # Data preprocessing
   # The file name of training and test dataset
   tf.logging.info("Data preprocessing...")
-#  if num_gpus > 0:
-#    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-  start = time.time()
+
   train_speech_dataset = generate_dataset(flags_obj.train_data_dir)
   eval_speech_dataset = generate_dataset(flags_obj.eval_data_dir)
-  tf.logging.info("Data preprocessing time: {}".format(time.time() - start))
-#  if num_gpus > 0:
-#    gpu_devices = ""
-#    for gpu_id in list(range(num_gpus)):
-#      gpu_devices += (str(gpu_id) + ",")
-#    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
 
   # Number of label classes. Label string is "[a-z]' -"
   num_classes = len(train_speech_dataset.speech_labels)
@@ -116,6 +164,7 @@ def run_deep_speech(_):
       flags_obj.rnn_activation, num_classes, flags_obj.use_bias)
 
   # Convert to estimator
+  num_gpus = flags_core.get_num_gpus(flags_obj)
   estimator = convert_keras_to_estimator(keras_model, num_gpus)
 
   # Benchmark logging
@@ -146,7 +195,7 @@ def run_deep_speech(_):
     return dataset.input_fn(
         per_device_batch_size, train_speech_dataset)
 
-  def input_fn_eval():  # #pylint: disable=unused-variable
+  def input_fn_eval():
     return dataset.input_fn(
         per_device_batch_size, eval_speech_dataset)
 
@@ -158,22 +207,23 @@ def run_deep_speech(_):
 
     estimator.train(input_fn=input_fn_train, hooks=train_hooks)
 
-    # Evaluate (TODO)
-    # tf.logging.info("Starting to evaluate.")
+    # Evaluation
+    tf.logging.info("Starting to evaluate...")
 
-    # eval_results = evaluate_model(
-    #     estimator, keras_model, data_set.speech_labels, [], input_fn_eval)
+    eval_results = evaluate_model(
+        estimator, flags_obj.batch_size, eval_speech_dataset.speech_labels,
+        eval_speech_dataset.labels, input_fn_eval)
 
-    # benchmark_logger.log_evaluation_result(eval_results)
+    # Log the WER and CER results.
+    benchmark_logger.log_evaluation_result(eval_results)
+    tf.logging.info(
+      "Iteration {}: WER = {:.2f}, CER = {:.2f}".format(
+          cycle_index + 1, eval_results[_WER_KEY], eval_results[_CER_KEY]))
+
     # If some evaluation threshold is met
-        # Log the HR and NDCG results.
-    # wer = eval_results[_WER_KEY]
-    # cer = eval_results[_CER_KEY]
-    # tf.logging.info(
-    #     "Iteration {}: WER = {:.2f}, CER = {:.2f}".format(
-    #         cycle_index + 1, wer, cer))
-    # if model_helpers.past_stop_threshold(FLAGS.wer_threshold, wer):
-    #   break
+    if model_helpers.past_stop_threshold(
+        flags_obj.wer_threshold, eval_results[_WER_KEY]):
+      break
 
   # Clear the session explicitly to avoid session delete error
   tf.keras.backend.clear_session()
@@ -200,18 +250,19 @@ def define_deep_speech_flags():
       model_dir="/tmp/deep_speech_model/",
       export_dir="/tmp/deep_speech_saved_model/",
       train_epochs=2,
-      batch_size=128,
+      batch_size=4,
       hooks="")
 
   # Deep speech flags
   flags.DEFINE_string(
       name="train_data_dir",
-      default="/tmp/librispeech_data/train-clean-100/LibriSpeech/train-clean-100.csv",
+      default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-200.csv",
+      # default = "/tmp/librispeech_data/train-clean-100/LibriSpeech/train-clean-100-1000.csv",
       help=flags_core.help_wrap("The csv file path of train dataset."))
 
   flags.DEFINE_string(
       name="eval_data_dir",
-      default="/tmp/librispeech_data/train-clean-100/LibriSpeech/train-clean-100-10.csv",
+      default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
       help=flags_core.help_wrap("The csv file path of evaluation dataset."))
 
   flags.DEFINE_integer(

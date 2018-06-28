@@ -47,7 +47,7 @@ def _conv_bn_layer(cnn_input, filters, kernel_size, strides, layer_id):
     tensor output from the current layer.
   """
   output = tf.keras.layers.Conv2D(
-      filters=filters, kernel_size=kernel_size, strides=strides, padding="same",
+      filters=filters, kernel_size=kernel_size, strides=strides, padding="valid",
       activation="linear", name="cnn_{}".format(layer_id))(cnn_input)
   output = tf.keras.layers.BatchNormalization(
       momentum=_MOMENTUM, epsilon=_EPSILON)(output)
@@ -89,9 +89,18 @@ def _ctc_lambda_func(args):
   # py2 needs explicit tf import for keras Lambda layer
   import tensorflow as tf
 
-  y_pred, labels, input_length, label_length = args
-  return tf.keras.backend.ctc_batch_cost(
-      labels, y_pred, input_length, label_length)
+  labels, y_pred, input_length, label_length = args
+  label_length = tf.to_int32(tf.squeeze(label_length, axis=-1))
+  input_length = tf.to_int32(tf.squeeze(input_length, axis=-1))
+  sparse_labels = tf.to_int32(tf.keras.backend.ctc_label_dense_to_sparse(
+          labels, label_length))
+
+  return tf.expand_dims(tf.nn.ctc_loss(
+            inputs=y_pred,
+            labels=sparse_labels,
+            sequence_length=input_length,
+            ignore_longer_outputs_than_inputs=True,
+            time_major=False), 1)
 
 
 def _calc_ctc_input_length(args):
@@ -187,7 +196,7 @@ class DeepSpeech(tf.keras.models.Model):
     # so CTC loss is implemented in a lambda layer
     ctc_loss = tf.keras.layers.Lambda(
         _ctc_lambda_func, output_shape=(1,), name="ctc_loss")(
-            [y_pred, labels, ctc_input_length, label_length])
+            [labels, y_pred, ctc_input_length, label_length])
 
     super(DeepSpeech, self).__init__(
         inputs=[input_data, labels, input_length, label_length],
