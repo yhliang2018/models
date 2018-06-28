@@ -13,7 +13,6 @@
 #  limitations under the License.
 # ==============================================================================
 """Utility class for extracting features from the text and audio input."""
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -22,7 +21,7 @@ import codecs
 import functools
 import numpy as np
 import tensorflow as tf
-
+from scipy import signal
 
 class AudioFeaturizer(object):
   """Class to extract spectrogram features from the audio input."""
@@ -38,7 +37,7 @@ class AudioFeaturizer(object):
     """Initialize the audio featurizer class according to the configs.
 
     Args:
-      sample_rate: an integer denoting the sample rate of the input waveform.
+      sample_rate: an integer specifying the sample rate of the input waveform.
       frame_length: an integer for the length of a spectrogram frame, in ms.
       frame_step: an integer for the frame stride, in ms.
       fft_length: an integer for the number of fft bins.
@@ -73,18 +72,28 @@ class AudioFeaturizer(object):
     # `stfts` is a complex64 Tensor representing the Short-time Fourier
     # Transform of each signal in `signals`. Its shape is
     # [?, fft_unique_bins] where fft_unique_bins = fft_length // 2 + 1.
-    stfts = tf.contrib.signal.stft(
-        waveform,
-        frame_length=self.frame_length,
-        frame_step=self.frame_step,
-        fft_length=self.fft_length,
-        window_fn=self.window_fn,
-        pad_end=True)
+    # stfts = tf.contrib.signal.stft(
+    #    waveform,
+    #    frame_length=self.frame_length,
+    #    frame_step=self.frame_step,
+    #    fft_length=self.fft_length,
+    #    window_fn=self.window_fn,
+    #    pad_end=True)
 
     # An energy spectrogram is the magnitude of the complex-valued STFT.
     # A float32 Tensor of shape [?, 257].
-    magnitude_spectrograms = tf.abs(stfts)
-    return magnitude_spectrograms
+    # magnitude_spectrograms = tf.abs(stfts)
+    # return magnitude_spectrograms
+    _, _, stft = signal.stft(
+        waveform,
+        # fs=self.sample_rate,
+        # nperseg=self.frame_length,
+        # nperseg=256,
+        noverlap=self.frame_step,
+        nfft=self.fft_length)
+
+    spectrogram = np.transpose(np.absolute(stft), (1, 0))
+    return spectrogram
 
   def _compute_mel_filterbank_features(self, waveform):
     """Compute the mel filterbank features."""
@@ -92,9 +101,10 @@ class AudioFeaturizer(object):
 
 
 class TextFeaturizer(object):
-  """Extract text feature based on char-level granularity. By looking up the
-  vocabulary table, each input string (one line of transcript) will be converted
-  to a sequence of integer indexes.
+  """Extract text feature based on char-level granularity.
+
+  By looking up the vocabulary table, each input string (one line of transcript)
+  will be converted to a sequence of integer indexes.
   """
 
   def __init__(self, vocab_file):
@@ -103,16 +113,16 @@ class TextFeaturizer(object):
       lines.extend(fin.readlines())
     self.token_to_idx = {}
     self.idx_to_token = {}
-    self.labels = ""
+    self.speech_labels = ""
     idx = 0
     for line in lines:
+      line = line[:-1]  # Strip the '\n' char.
       if line.startswith("#"):
-        # Skip reading comment line.
+        # Skip from reading comment line.
         continue
-      line = line[:-1]  # Strip the new line.
       self.token_to_idx[line] = idx
       self.idx_to_token[idx] = line
-      self.labels += line
+      self.speech_labels += line
       idx += 1
 
   def featurize(self, text):
@@ -120,8 +130,3 @@ class TextFeaturizer(object):
     tokens = list(text.strip().lower())
     feats = [self.token_to_idx[token] for token in tokens]
     return feats
-
-  def revert_featurize(self, feat):
-    """Convert a list of integers to a string."""
-    return "".join(self.idx_to_token[idx] for idx in feat)
-
