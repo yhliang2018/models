@@ -17,14 +17,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
-import multiprocessing
+import math
+import random
 
 import numpy as np
 import scipy.io.wavfile as wavfile
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
-
+import soundfile
 import data.featurizer as featurizer  # pylint: disable=g-bad-import-order
 
 
@@ -33,11 +33,9 @@ class AudioConfig(object):
 
   def __init__(self,
                sample_rate,
-               frame_length,
-               frame_step,
-               fft_length=None,
-               normalize=False,
-               spect_type="linear"):
+               window_ms,
+               stride_ms,
+               normalize=False):
     """Initialize the AudioConfig class.
 
     Args:
@@ -50,11 +48,9 @@ class AudioConfig(object):
     """
 
     self.sample_rate = sample_rate
-    self.frame_length = frame_length
-    self.frame_step = frame_step
-    self.fft_length = fft_length
+    self.window_ms = window_ms
+    self.stride_ms = stride_ms
     self.normalize = normalize
-    self.spect_type = spect_type
 
 
 class DatasetConfig(object):
@@ -67,6 +63,8 @@ class DatasetConfig(object):
       audio_config: AudioConfig object specifying the audio-related configs.
       data_path: a string denoting the full path of a manifest file.
       vocab_file_path: a string specifying the vocabulary file path.
+      sortagrad: a boolean to control whether sorting the audio in the first
+        training epoch.
 
     Raises:
       RuntimeError: file path not exist.
@@ -77,6 +75,7 @@ class DatasetConfig(object):
     assert tf.gfile.Exists(vocab_file_path)
     self.data_path = data_path
     self.vocab_file_path = vocab_file_path
+    # self.sortagrad = sortagrad
 
 
 def _normalize_audio_feature(audio_feature):
@@ -95,20 +94,18 @@ def _normalize_audio_feature(audio_feature):
   return normalized
 
 
-def _preprocess_audio(
-    audio_file_path, audio_sample_rate, audio_featurizer, normalize):
+def _preprocess_audio(audio_file_path, audio_featurizer, normalize):
   """Load the audio file in memory and compute spectrogram feature."""
-  tf.logging.info(
-      "Extracting spectrogram feature for {}".format(audio_file_path))
-  sample_rate, data = wavfile.read(audio_file_path)
-  assert sample_rate == audio_sample_rate
-  if data.dtype not in [np.float32, np.float64]:
-    data = data.astype(np.float32) / np.iinfo(data.dtype).max
+  data, _ = soundfile.read(audio_file_path)
   feature = featurizer.compute_spectrogram_feature(
-      data, audio_featurizer.frame_length, audio_featurizer.frame_step,
-      audio_featurizer.fft_length)
+    data, audio_featurizer.sample_rate, audio_featurizer.stride_ms,
+    audio_featurizer.window_ms)
+  # Feature normalization
   if normalize:
     feature = _normalize_audio_feature(feature)
+
+  # Adding channel dimension for conv2D input.
+  feature = np.expand_dims(feature, axis=2)
   return feature
 
 
@@ -117,7 +114,7 @@ def _preprocess_transcript(transcript, token_to_index):
   return featurizer.compute_label_feature(transcript, token_to_index)
 
 
-def _preprocess_data(dataset_config, audio_featurizer, token_to_index):
+def _preprocess_data(file_path):
   """Generate a list of waveform, transcript pair.
 
   Each dataset file contains three columns: "wav_filename", "wav_filesize",
@@ -127,42 +124,21 @@ def _preprocess_data(dataset_config, audio_featurizer, token_to_index):
   mini-batch have similar length.
 
   Args:
-    dataset_config: an instance of DatasetConfig.
-    audio_featurizer: an instance of AudioFeaturizer.
-    token_to_index: the mapping from character to its index
+    file_path: a string specifying the csv file path for a dataset.
 
   Returns:
-    features and labels array processed from the audio/text input.
+     A list of tuples (audio_file_path, file_size, transcript) sorted by file
+     size.
   """
-
-  file_path = dataset_config.data_path
-  sample_rate = dataset_config.audio_config.sample_rate
-  normalize = dataset_config.audio_config.normalize
 
   with tf.gfile.Open(file_path, "r") as f:
     lines = f.read().splitlines()
-  lines = [line.split("\t") for line in lines]
-  # Skip the csv header.
+  # Skip the csv header in lines[0].
   lines = lines[1:]
+  lines = [line.split("\t") for line in lines]
   # Sort input data by the length of waveform.
   lines.sort(key=lambda item: int(item[1]))
-
-  # Use multiprocessing for feature/label extraction
-  num_cores = multiprocessing.cpu_count()
-  pool = multiprocessing.Pool(processes=num_cores)
-
-  features = pool.map(
-      functools.partial(
-          _preprocess_audio, audio_sample_rate=sample_rate,
-          audio_featurizer=audio_featurizer, normalize=normalize),
-      [line[0] for line in lines])
-  labels = pool.map(
-      functools.partial(
-          _preprocess_transcript, token_to_index=token_to_index),
-      [line[2] for line in lines])
-
-  pool.terminate()
-  return features, labels
+  return [(line[0], line[1], line[2]) for line in lines]
 
 
 class DeepSpeechDataset(object):
@@ -178,22 +154,42 @@ class DeepSpeechDataset(object):
     # Instantiate audio feature extractor.
     self.audio_featurizer = featurizer.AudioFeaturizer(
         sample_rate=self.config.audio_config.sample_rate,
-        frame_length=self.config.audio_config.frame_length,
-        frame_step=self.config.audio_config.frame_step,
-        fft_length=self.config.audio_config.fft_length)
+        window_ms=self.config.audio_config.window_ms,
+        stride_ms=self.config.audio_config.stride_ms)
     # Instantiate text feature extractor.
     self.text_featurizer = featurizer.TextFeaturizer(
         vocab_file=self.config.vocab_file_path)
 
     self.speech_labels = self.text_featurizer.speech_labels
-    self.features, self.labels = _preprocess_data(
-        self.config,
-        self.audio_featurizer,
-        self.text_featurizer.token_to_idx
-    )
+    self.entries = _preprocess_data(self.config.data_path)
 
-    self.num_feature_bins = (
-        self.features[0].shape[1] if len(self.features) else None)
+    # self.num_feature_bins = compute_num_feature_bins() (TODO)
+    self.num_feature_bins = 161
+
+
+def batch_wise_dataset_shuffle(entries, batch_size):
+  """Maybe shuffle the data entries (audio_file, file_size, transcript) batch-wise.
+
+     If epoch is 0 and sortagrad is true, we don't shuffle and
+     return entries in sorted file_size order. Otherwise, sort
+
+  Args:
+    batch_size: an integer for the batch size.
+    entries: a list of tuples (audio_file, file_size, transcript)
+  """
+  # if epoch == 0 and self.config.sortagrad:
+  #   # No need to shuffle.
+  #   return
+
+  # Shuffle entries batch-wise.
+  max_buckets = int(math.ceil(len(entries) / batch_size))
+  total_buckets = [i for i in xrange(max_buckets)]
+  random.shuffle(total_buckets)
+  shuffled_entries = []
+  for i in total_buckets:
+    shuffled_entries.extend(entries[i * batch_size : (i + 1) * batch_size])
+  entries = shuffled_entries
+  return entries
 
 
 def input_fn(batch_size, deep_speech_dataset, repeat=1):
@@ -207,18 +203,25 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
   Returns:
     a tf.data.Dataset object for model to consume.
   """
-  features = deep_speech_dataset.features
-  labels = deep_speech_dataset.labels
+  # Dataset properties
+  data_entries = deep_speech_dataset.entries
   num_feature_bins = deep_speech_dataset.num_feature_bins
+  audio_featurizer = deep_speech_dataset.audio_featurizer
+  feature_normalize = deep_speech_dataset.config.audio_config.normalize
+  text_featurizer = deep_speech_dataset.text_featurizer
 
   def _gen_data():
-    for i in xrange(len(features)):
-      feature = np.expand_dims(features[i], axis=2)
-      input_length = [features[i].shape[0]]
-      label_length = [len(labels[i])]
+    for i in xrange(len(data_entries)):
+      audio_file, transcript = data_entries[i][0], data_entries[i][2]
+      feature = _preprocess_audio(
+          audio_file, audio_featurizer, feature_normalize)
+      label = featurizer.compute_label_feature(
+          transcript, text_featurizer.token_to_index)
+      input_length = [feature.shape[0]]
+      label_length = [len(label)]
       yield {
           "features": feature,
-          "labels": labels[i],
+          "labels": label,
           "input_length": input_length,
           "label_length": label_length
       }

@@ -48,7 +48,8 @@ def _conv_bn_layer(cnn_input, filters, kernel_size, strides, layer_id):
   """
   output = tf.keras.layers.Conv2D(
       filters=filters, kernel_size=kernel_size, strides=strides, padding="valid",
-      activation="linear", name="cnn_{}".format(layer_id))(cnn_input)
+      activation="linear", use_bias=False,
+      name="cnn_{}".format(layer_id))(cnn_input)
   output = tf.keras.layers.BatchNormalization(
       momentum=_MOMENTUM, epsilon=_EPSILON)(output)
   return output
@@ -77,7 +78,7 @@ def _rnn_layer(input_data, rnn_cell, rnn_hidden_size, layer_id, rnn_activation,
         momentum=_MOMENTUM, epsilon=_EPSILON)(input_data)
   rnn_layer = rnn_cell(
       rnn_hidden_size, activation=rnn_activation, return_sequences=True,
-      name="rnn_{}".format(layer_id))
+      use_bias=False, name="rnn_{}".format(layer_id))
   if is_bidirectional:
     rnn_layer = tf.keras.layers.Bidirectional(rnn_layer, merge_mode="sum")
 
@@ -89,18 +90,9 @@ def _ctc_lambda_func(args):
   # py2 needs explicit tf import for keras Lambda layer
   import tensorflow as tf
 
-  labels, y_pred, input_length, label_length = args
-  label_length = tf.to_int32(tf.squeeze(label_length, axis=-1))
-  input_length = tf.to_int32(tf.squeeze(input_length, axis=-1))
-  sparse_labels = tf.to_int32(tf.keras.backend.ctc_label_dense_to_sparse(
-          labels, label_length))
-
-  return tf.expand_dims(tf.nn.ctc_loss(
-            inputs=y_pred,
-            labels=sparse_labels,
-            sequence_length=input_length,
-            ignore_longer_outputs_than_inputs=True,
-            time_major=False), 1)
+  y_pred, labels, input_length, label_length = args
+  return tf.keras.backend.ctc_batch_cost(
+      labels, y_pred, input_length, label_length)
 
 
 def _calc_ctc_input_length(args):
@@ -152,12 +144,15 @@ class DeepSpeech(tf.keras.models.Model):
         shape=input_shape, name="features")
 
     # Two cnn layers
+    # Perform zero padding to amend the long sequences
+    conv_input_1 = tf.keras.layers.ZeroPadding2D(padding=(20, 5))(input_data)
     conv_layer_1 = _conv_bn_layer(
-        input_data, filters=32, kernel_size=(41, 11), strides=(2, 2),
+        conv_input_1, filters=32, kernel_size=(41, 11), strides=(2, 2),
         layer_id=1)
 
+    conv_input_2 = tf.keras.layers.ZeroPadding2D(padding=(10, 5))(conv_layer_1)
     conv_layer_2 = _conv_bn_layer(
-        conv_layer_1, filters=32, kernel_size=(21, 11), strides=(2, 1),
+        conv_input_2, filters=32, kernel_size=(21, 11), strides=(2, 1),
         layer_id=2)
     # output of conv_layer2 with the shape of
     # [batch_size (N), times (T), features (F), channels (C)]
@@ -196,8 +191,8 @@ class DeepSpeech(tf.keras.models.Model):
     # so CTC loss is implemented in a lambda layer
     ctc_loss = tf.keras.layers.Lambda(
         _ctc_lambda_func, output_shape=(1,), name="ctc_loss")(
-            [labels, y_pred, ctc_input_length, label_length])
+            [y_pred, labels, ctc_input_length, label_length])
 
     super(DeepSpeech, self).__init__(
         inputs=[input_data, labels, input_length, label_length],
-        outputs=[ctc_input_length, ctc_loss, y_pred])
+        outputs=[ctc_loss, y_pred])

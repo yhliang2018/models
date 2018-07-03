@@ -41,47 +41,52 @@ _WER_KEY = "WER"
 _CER_KEY = "CER"
 
 
-def evaluate_model(estimator, batch_size, speech_labels, targets, input_fn_eval):
-  """Evaluate the model performance using WER(word error rate) and
-  CER(character error rate) as metrics.
+def evaluate_model(estimator, speech_labels, entries, input_fn_eval):
+  """Evaluate the model performance using WER anc CER as metrics.
+
+  WER: Word Error Rate
+  CER: Character Error Rate
+
   Args:
     estimator: estimator to evaluate.
-    batch_size: size of a mini-batch.
     speech_labels: a string specifying all the character in the vocabulary.
-    targets: a list of list of integers for the featurized transcript.
+    entries: list of data entries (audio_file, file_size, transcript) for the
+      given dataset.
     input_fn_eval: data input function for evaluation.
+
   Returns:
-    Evaluation result containing 'wer' and 'cer' as two metrics.
+    Evaluation result containing "WER" and "CER" as two metrics.
   """
   # Get predictions
-  predictions = estimator.predict(input_fn=input_fn_eval, yield_single_examples=False)
+  predictions = estimator.predict(input_fn=input_fn_eval)
 
   y_preds = []
-  input_lengths= []
+  input_lengths = []
   for p in predictions:
+    print("y_pred", p["y_pred"])
+    # print("ctc_input_length", p["ctc_input_length"])
+    # print("fc_input", p["fc_input"])
     y_preds.append(p["y_pred"])
-    input_lengths.append(p["ctc_input_length"])
+    # input_lengths.append(p["ctc_input_length"])
 
-  num_of_examples = len(targets)
+  num_of_examples = len(y_preds)
+  targets = [entry[2] for entry in entries]
+
   total_wer, total_cer = 0, 0
-  greedy_decoder = decoder.GreedyDecoder(speech_labels)
-  for i in range(len(y_preds)):
-    # Compute the CER and WER for the current batch,
-    # and aggregate to total_cer, total_wer.
-    y_pred_tensor = tf.convert_to_tensor(y_preds[i])
-    batch_targets = targets[i*batch_size : (i+1)*batch_size]
-    seq_len = tf.squeeze(input_lengths[i],axis=1)
-    # First decode.
-    decoded_strings, decoded_output = greedy_decoder.decode(y_pred_tensor, seq_len)
-    # print("Decoded strings")
-    # print(decoded_strings)
+  greedy_decoder = decoder.DeepSpeechDecoder(speech_labels)
+  for i in range(num_of_examples):
+    # Decode string.
+    decoded_str = greedy_decoder.decode(y_preds[i])
+    print("Predicted:", decoded_str)
+    print("GT:", targets[i])
     # Compute CER.
-    batch_cer = greedy_decoder.batch_cer(decoded_output, batch_targets)
-    total_cer += batch_cer
+    total_cer += greedy_decoder.cer(decoded_str, targets[i]) / float(
+          len(targets[i]))
     # Compute WER.
-    batch_wer = greedy_decoder.batch_wer(decoded_output, batch_targets)
-    total_wer += batch_wer
+    total_wer += greedy_decoder.wer(decoded_str, targets[i]) / float(
+          len(targets[i].split()))
 
+  # Get mean value
   total_cer /= num_of_examples
   total_wer /= num_of_examples
 
@@ -107,13 +112,17 @@ def convert_keras_to_estimator(keras_model, num_gpus):
   """
   # keras optimizer is not compatible with distribution strategy.
   # Use tf optimizer instead
-  optimizer = tf.train.MomentumOptimizer(
-      learning_rate=flags_obj.learning_rate, momentum=flags_obj.momentum,
-      use_nesterov=True)
+  # optimizer = tf.train.MomentumOptimizer(
+  #     learning_rate=flags_obj.learning_rate, momentum=flags_obj.momentum,
+  #     use_nesterov=True)
+  optimizer = tf.train.AdamOptimizer(learning_rate=flags_obj.learning_rate)
 
   # ctc_loss is wrapped as a Lambda layer in the model.
   keras_model.compile(
       optimizer=optimizer, loss={"ctc_loss": lambda y_true, y_pred: y_pred})
+
+  # y_pred = keras_model.get_layer('ctc_loss').input[0]
+  # ctc_input_length = keras_model.get_layer('ctc_loss').input[2]
 
   distribution_strategy = distribution_utils.get_distribution_strategy(
       num_gpus)
@@ -129,7 +138,7 @@ def convert_keras_to_estimator(keras_model, num_gpus):
 def generate_dataset(data_dir):
   """Generate a speech dataset."""
   audio_conf = dataset.AudioConfig(
-      flags_obj.sample_rate, flags_obj.frame_length, flags_obj.frame_step)
+      flags_obj.sample_rate, flags_obj.window_ms, flags_obj.stride_ms)
   train_data_conf = dataset.DatasetConfig(
       audio_conf,
       data_dir,
@@ -201,24 +210,30 @@ def run_deep_speech(_):
 
   total_training_cycle = (flags_obj.train_epochs //
                           flags_obj.epochs_between_evals)
+
   for cycle_index in range(total_training_cycle):
     tf.logging.info("Starting a training cycle: %d/%d",
                     cycle_index + 1, total_training_cycle)
 
+    # Perform batch_wise dataset shuffling
+    train_speech_dataset.entries = dataset.batch_wise_dataset_shuffle(
+        train_speech_dataset.entries, flags_obj.batch_size)
+
+    # Model training
     estimator.train(input_fn=input_fn_train, hooks=train_hooks)
 
     # Evaluation
     tf.logging.info("Starting to evaluate...")
 
     eval_results = evaluate_model(
-        estimator, flags_obj.batch_size, eval_speech_dataset.speech_labels,
-        eval_speech_dataset.labels, input_fn_eval)
+        estimator, eval_speech_dataset.speech_labels,
+        eval_speech_dataset.entries, input_fn_eval)
 
     # Log the WER and CER results.
     benchmark_logger.log_evaluation_result(eval_results)
     tf.logging.info(
-      "Iteration {}: WER = {:.2f}, CER = {:.2f}".format(
-          cycle_index + 1, eval_results[_WER_KEY], eval_results[_CER_KEY]))
+        "Iteration {}: WER = {:.2f}, CER = {:.2f}".format(
+            cycle_index + 1, eval_results[_WER_KEY], eval_results[_CER_KEY]))
 
     # If some evaluation threshold is met
     if model_helpers.past_stop_threshold(
@@ -249,20 +264,21 @@ def define_deep_speech_flags():
   flags_core.set_defaults(
       model_dir="/tmp/deep_speech_model/",
       export_dir="/tmp/deep_speech_saved_model/",
-      train_epochs=2,
+      train_epochs=10,
       batch_size=4,
       hooks="")
 
   # Deep speech flags
   flags.DEFINE_string(
       name="train_data_dir",
-      default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-200.csv",
-      # default = "/tmp/librispeech_data/train-clean-100/LibriSpeech/train-clean-100-1000.csv",
+      #default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
+      default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
       help=flags_core.help_wrap("The csv file path of train dataset."))
 
   flags.DEFINE_string(
       name="eval_data_dir",
-      default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
+     # default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
+     default="/tmp/librispeech_data/test-clean/LibriSpeech/test-clean-20.csv",
       help=flags_core.help_wrap("The csv file path of evaluation dataset."))
 
   flags.DEFINE_integer(
@@ -270,11 +286,11 @@ def define_deep_speech_flags():
       help=flags_core.help_wrap("The sample rate for audio."))
 
   flags.DEFINE_integer(
-      name="frame_length", default=25,
+      name="window_ms", default=20,
       help=flags_core.help_wrap("The frame length for spectrogram."))
 
   flags.DEFINE_integer(
-      name="frame_step", default=10,
+      name="stride_ms", default=10,
       help=flags_core.help_wrap("The frame step."))
 
   flags.DEFINE_string(
@@ -283,7 +299,7 @@ def define_deep_speech_flags():
 
   # RNN related flags
   flags.DEFINE_integer(
-      name="rnn_hidden_size", default=256,
+      name="rnn_hidden_size", default=512,
       help=flags_core.help_wrap("The hidden size of RNNs."))
 
   flags.DEFINE_integer(
@@ -305,8 +321,8 @@ def define_deep_speech_flags():
       help=flags_core.help_wrap("Type of RNN cell."))
 
   flags.DEFINE_enum(
-      name="rnn_activation", default="tanh",
-      enum_values=["tanh", "relu"], case_sensitive=False,
+      name="rnn_activation", default="relu",
+      enum_values=["relu"], case_sensitive=False,
       help=flags_core.help_wrap("Type of the activation within RNN."))
 
   # Training related flags
