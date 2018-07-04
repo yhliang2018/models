@@ -22,9 +22,9 @@ import tensorflow as tf
 
 # Supported rnn cells
 SUPPORTED_RNNS = {
-    "lstm": tf.keras.layers.LSTM,
-    "rnn": tf.keras.layers.SimpleRNN,
-    "gru": tf.keras.layers.GRU,
+    "lstm": tf.nn.rnn_cell.LSTMCell,
+    "rnn": tf.nn.rnn_cell.RNNCell,
+    "gru": tf.nn.rnn_cell.GRUCell,
 }
 
 # Parameters for batch normalization
@@ -32,7 +32,7 @@ _MOMENTUM = 0.1
 _EPSILON = 1e-05
 
 
-def _conv_bn_layer(cnn_input, filters, kernel_size, strides, layer_id):
+def _conv_bn_layer(inputs, zero_padding, filters, kernel_size, strides, layer_id):
   """2D convolution + batch normalization layer.
 
   Args:
@@ -46,16 +46,17 @@ def _conv_bn_layer(cnn_input, filters, kernel_size, strides, layer_id):
   Returns:
     tensor output from the current layer.
   """
-  output = tf.keras.layers.Conv2D(
-      filters=filters, kernel_size=kernel_size, strides=strides, padding="valid",
-      activation="linear", use_bias=False,
-      name="cnn_{}".format(layer_id))(cnn_input)
-  output = tf.keras.layers.BatchNormalization(
-      momentum=_MOMENTUM, epsilon=_EPSILON)(output)
-  return output
+  # inputs = tf.pad(padding=zero_padding))
+  inputs = tf.layers.conv2d(
+      inputs=inputs, filters=filters, kernel_size=kernel_size, strides=strides,
+      padding="valid", use_bias=False,
+      name="cnn_{}".format(layer_id))
+  inputs = tf.layers.batch_normalization(
+      inputs=inputs, momentum=_MOMENTUM, epsilon=_EPSILON)
+  return inputs
 
 
-def _rnn_layer(input_data, rnn_cell, rnn_hidden_size, layer_id, rnn_activation,
+def _rnn_layer(inputs, rnn_cell, rnn_hidden_size, layer_id, rnn_activation,
                is_batch_norm, is_bidirectional):
   """Defines a batch normalization + rnn layer.
 
@@ -73,59 +74,33 @@ def _rnn_layer(input_data, rnn_cell, rnn_hidden_size, layer_id, rnn_activation,
   Returns:
     tensor output for the current layer.
   """
+  if rnn_activation == "relu":
+    rnn_activation = tf.nn.relu
+
   if is_batch_norm:
-    input_data = tf.keras.layers.BatchNormalization(
-        momentum=_MOMENTUM, epsilon=_EPSILON)(input_data)
-  rnn_layer = rnn_cell(
-      rnn_hidden_size, activation=rnn_activation, return_sequences=True,
-      use_bias=False, name="rnn_{}".format(layer_id))
+    inputs = tf.layers.batch_normalization(
+        inputs=inputs, momentum=_MOMENTUM, epsilon=_EPSILON)
+  rnn_cell = rnn_cell(
+      rnn_hidden_size, activation=rnn_activation,
+      name="rnn_{}".format(layer_id))
   if is_bidirectional:
-    rnn_layer = tf.keras.layers.Bidirectional(rnn_layer, merge_mode="sum")
+    outputs, _= tf.nn.bidirectional_dynamic_rnn(
+        rnn_cell, rnn_cell, inputs, dtype=tf.float32,
+        swap_memory=True)
+    outputs_fw, outputs_bw = outputs
+    rnn_outputs = outputs_fw + outputs_bw
+  else:
+    rnn_outputs = tf.nn.dynamic_rnn(
+        rnn_cell, inputs, dtype=tf.float32, swap_memory=True)
 
-  return rnn_layer(input_data)
-
-
-def _ctc_lambda_func(args):
-  """Compute ctc loss."""
-  # py2 needs explicit tf import for keras Lambda layer
-  import tensorflow as tf
-
-  y_pred, labels, input_length, label_length = args
-  return tf.keras.backend.ctc_batch_cost(
-      labels, y_pred, input_length, label_length)
+  return rnn_outputs
 
 
-def _calc_ctc_input_length(args):
-  """Compute the actual input length after convolution for ctc_loss function.
+class DeepSpeech2(object):
 
-  Basically, we need to know the scaled input_length after conv layers.
-  new_input_length = old_input_length * ctc_time_steps / max_time_steps
-
-  Args:
-    args: the input args to compute ctc input length.
-
-  Returns:
-    ctc_input_length, which is required for ctc loss calculation.
-  """
-  # py2 needs explicit tf import for keras Lambda layer
-  import tensorflow as tf
-
-  input_length, input_data, y_pred = args
-  max_time_steps = tf.shape(input_data)[1]
-  ctc_time_steps = tf.shape(y_pred)[1]
-  ctc_input_length = tf.multiply(
-      tf.to_float(input_length), tf.to_float(ctc_time_steps))
-  ctc_input_length = tf.to_int32(tf.floordiv(
-      ctc_input_length, tf.to_float(max_time_steps)))
-  return ctc_input_length
-
-
-class DeepSpeech(tf.keras.models.Model):
-  """DeepSpeech model."""
-
-  def __init__(self, input_shape, num_rnn_layers, rnn_type, is_bidirectional,
+  def __init__(self, batch_size, num_rnn_layers, rnn_type, is_bidirectional,
                rnn_hidden_size, rnn_activation, num_classes, use_bias):
-    """Initialize DeepSpeech model.
+    """Create DeepSpeech model.
 
     Args:
       input_shape: an tuple to indicate the dimension of input dataset. It has
@@ -138,61 +113,54 @@ class DeepSpeech(tf.keras.models.Model):
         one of tanh and relu.
       num_classes: an integer, the number of output classes/labels.
       use_bias: a boolean specifying whether to use bias in the last fc layer.
-    """
-    # Input variables
-    input_data = tf.keras.layers.Input(
-        shape=input_shape, name="features")
 
+    Returns:
+    A tf.keras.Model.
+    """
+    self.batch_size = batch_size
+    self.num_rnn_layers = num_rnn_layers
+    self.rnn_type = rnn_type
+    self.is_bidirectional = is_bidirectional
+    self.rnn_hidden_size = rnn_hidden_size
+    self.rnn_activation = rnn_activation
+    self.num_classes = num_classes
+    self.use_bias = use_bias
+
+  def __call__(self, inputs, training):
     # Two cnn layers
     # Perform zero padding to amend the long sequences
-    conv_input_1 = tf.keras.layers.ZeroPadding2D(padding=(20, 5))(input_data)
-    conv_layer_1 = _conv_bn_layer(
-        conv_input_1, filters=32, kernel_size=(41, 11), strides=(2, 2),
-        layer_id=1)
+    inputs = _conv_bn_layer(
+        inputs, zero_padding=(20, 5), filters=32, kernel_size=(41, 11),
+        strides=(2, 2), layer_id=1)
 
-    conv_input_2 = tf.keras.layers.ZeroPadding2D(padding=(10, 5))(conv_layer_1)
-    conv_layer_2 = _conv_bn_layer(
-        conv_input_2, filters=32, kernel_size=(21, 11), strides=(2, 1),
-        layer_id=2)
+    inputs = _conv_bn_layer(
+        inputs, zero_padding=(10, 5), filters=32, kernel_size=(21, 11),
+        strides=(2, 1), layer_id=2)
     # output of conv_layer2 with the shape of
     # [batch_size (N), times (T), features (F), channels (C)]
+    inputs_shape = inputs.get_shape().as_list()
+    inputs = tf.reshape(
+        inputs,
+        [self.batch_size, -1, inputs_shape[2] * 32])
 
     # RNN layers.
     # Convert the conv output to rnn input
-    rnn_input = tf.keras.layers.TimeDistributed(tf.keras.layers.Flatten())(
-        conv_layer_2)
-
-    rnn_cell = SUPPORTED_RNNS[rnn_type]
-    for layer_counter in xrange(num_rnn_layers):
+    # model.add(tf.keras.layers.TimeDistributed(tf.keras.layers.Flatten()))
+    print("rnn inputs", inputs)
+    rnn_cell = SUPPORTED_RNNS[self.rnn_type]
+    for layer_counter in xrange(self.num_rnn_layers):
       # No batch normalization on the first layer
       is_batch_norm = (layer_counter != 0)
-      rnn_input = _rnn_layer(
-          rnn_input, rnn_cell, rnn_hidden_size, layer_counter + 1,
-          rnn_activation, is_batch_norm, is_bidirectional)
+      inputs = _rnn_layer(
+          inputs, rnn_cell, self.rnn_hidden_size, layer_counter + 1,
+          self.rnn_activation, is_batch_norm, self.is_bidirectional)
 
     # FC layer with batch norm
-    fc_input = tf.keras.layers.BatchNormalization(
-        momentum=_MOMENTUM, epsilon=_EPSILON)(rnn_input)
 
-    y_pred = tf.keras.layers.Dense(num_classes, activation="softmax",
-                                   use_bias=use_bias, name="y_pred")(fc_input)
+    inputs = tf.layers.batch_normalization(
+        inputs=inputs, momentum=_MOMENTUM, epsilon=_EPSILON)
 
-    # For ctc loss
-    labels = tf.keras.layers.Input(name="labels", shape=[None,], dtype="int32")
-    label_length = tf.keras.layers.Input(
-        name="label_length", shape=[1], dtype="int32")
-    input_length = tf.keras.layers.Input(
-        name="input_length", shape=[1], dtype="int32")
-    ctc_input_length = tf.keras.layers.Lambda(
-        _calc_ctc_input_length, output_shape=(1,), name="ctc_input_length")(
-            [input_length, input_data, y_pred])
+    logits = tf.layers.dense(
+        inputs, self.num_classes, activation=tf.nn.softmax, use_bias=self.use_bias)
 
-    # Keras doesn't currently support loss funcs with extra parameters
-    # so CTC loss is implemented in a lambda layer
-    ctc_loss = tf.keras.layers.Lambda(
-        _ctc_lambda_func, output_shape=(1,), name="ctc_loss")(
-            [y_pred, labels, ctc_input_length, label_length])
-
-    super(DeepSpeech, self).__init__(
-        inputs=[input_data, labels, input_length, label_length],
-        outputs=[ctc_loss, y_pred])
+    return logits

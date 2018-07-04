@@ -56,7 +56,7 @@ class AudioConfig(object):
 class DatasetConfig(object):
   """Config class for generating the DeepSpeechDataset."""
 
-  def __init__(self, audio_config, data_path, vocab_file_path):
+  def __init__(self, audio_config, data_path, vocab_file_path, sortagrad):
     """Initialize the configs for deep speech dataset.
 
     Args:
@@ -75,7 +75,7 @@ class DatasetConfig(object):
     assert tf.gfile.Exists(vocab_file_path)
     self.data_path = data_path
     self.vocab_file_path = vocab_file_path
-    # self.sortagrad = sortagrad
+    self.sortagrad = sortagrad
 
 
 def _normalize_audio_feature(audio_feature):
@@ -167,29 +167,33 @@ class DeepSpeechDataset(object):
     self.num_feature_bins = 161
 
 
-def batch_wise_dataset_shuffle(entries, batch_size):
+def batch_wise_dataset_shuffle(entries, epoch_index, sortagrad, batch_size):
   """Maybe shuffle the data entries (audio_file, file_size, transcript) batch-wise.
 
-     If epoch is 0 and sortagrad is true, we don't shuffle and
-     return entries in sorted file_size order. Otherwise, sort
+     If epoch_index is 0 and sortagrad is true, we don't shuffle and
+     return entries in sorted file_size order. Otherwise, do batch_wise shuffling.
 
   Args:
     batch_size: an integer for the batch size.
-    entries: a list of tuples (audio_file, file_size, transcript)
-  """
-  # if epoch == 0 and self.config.sortagrad:
-  #   # No need to shuffle.
-  #   return
+    entries: a list of tuples (audio_file, file_size, transcript).
 
-  # Shuffle entries batch-wise.
-  max_buckets = int(math.ceil(len(entries) / batch_size))
-  total_buckets = [i for i in xrange(max_buckets)]
-  random.shuffle(total_buckets)
+  Returns:
+    The shuffled data entries.
+  """
   shuffled_entries = []
-  for i in total_buckets:
-    shuffled_entries.extend(entries[i * batch_size : (i + 1) * batch_size])
-  entries = shuffled_entries
-  return entries
+  if epoch_index == 0 and sortagrad:
+     # No need to shuffle.
+     shuffled_entries = entries
+  else:
+    # Shuffle entries batch-wise.
+    max_buckets = int(math.ceil(len(entries) / batch_size))
+    total_buckets = [i for i in xrange(max_buckets)]
+    random.shuffle(total_buckets)
+    shuffled_entries = []
+    for i in total_buckets:
+      shuffled_entries.extend(entries[i * batch_size : (i + 1) * batch_size])
+
+  return shuffled_entries
 
 
 def input_fn(batch_size, deep_speech_dataset, repeat=1):
@@ -213,45 +217,48 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
   def _gen_data():
     for i in xrange(len(data_entries)):
       audio_file, transcript = data_entries[i][0], data_entries[i][2]
-      feature = _preprocess_audio(
+      features = _preprocess_audio(
           audio_file, audio_featurizer, feature_normalize)
-      label = featurizer.compute_label_feature(
+      labels = featurizer.compute_label_feature(
           transcript, text_featurizer.token_to_index)
-      input_length = [feature.shape[0]]
-      label_length = [len(label)]
-      yield {
-          "features": feature,
-          "labels": label,
-          "input_length": input_length,
-          "label_length": label_length
-      }
+      input_length = [features.shape[0]]
+      label_length = [len(labels)]
+      yield ({
+              "features": features,
+              "input_length": input_length,
+              "label_length": label_length
+          },
+          labels)
 
   dataset = tf.data.Dataset.from_generator(
       _gen_data,
-      output_types={
-          "features": tf.float32,
-          "labels": tf.int32,
-          "input_length": tf.int32,
-          "label_length": tf.int32
-      },
-      output_shapes={
-          "features": tf.TensorShape([None, num_feature_bins, 1]),
-          "labels": tf.TensorShape([None]),
-          "input_length": tf.TensorShape([1]),
-          "label_length": tf.TensorShape([1])
-      })
+      output_types=({
+              "features": tf.float32,
+              "input_length": tf.int32,
+              "label_length": tf.int32
+          },
+          tf.int32),
+      output_shapes=({
+              "features": tf.TensorShape([None, num_feature_bins, 1]),
+              "input_length": tf.TensorShape([1]),
+              "label_length": tf.TensorShape([1])
+          },
+          tf.TensorShape([None]))
+  )
 
   # Repeat and batch the dataset
   dataset = dataset.repeat(repeat)
   # Padding the features to its max length dimensions.
   dataset = dataset.padded_batch(
       batch_size=batch_size,
-      padded_shapes={
-          "features": tf.TensorShape([None, num_feature_bins, 1]),
-          "labels": tf.TensorShape([None]),
-          "input_length": tf.TensorShape([1]),
-          "label_length": tf.TensorShape([1])
-      })
+      padded_shapes=({
+              "features": tf.TensorShape([None, num_feature_bins, 1]),
+              "input_length": tf.TensorShape([1]),
+              "label_length": tf.TensorShape([1])
+          },
+          tf.TensorShape([None]),
+      )
+  )
 
   # Prefetch to improve speed of input pipeline.
   dataset = dataset.prefetch(1)
