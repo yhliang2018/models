@@ -1,3 +1,4 @@
+
 # Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,74 +19,77 @@ from __future__ import division
 from __future__ import print_function
 
 import itertools
+
 from nltk.metrics import distance
 import numpy as np
-from six.moves import xrange
-import tensorflow as tf
 
 
 class DeepSpeechDecoder(object):
-  """Basic decoder class from which all other decoders inherit.
+  """Greedy decoder implementation for Deep Speech model."""
 
-  Implements several helper functions. Subclasses should implement the decode()
-  method.
-  """
-
-  def __init__(self, labels):
+  def __init__(self, labels, blank_index=28):
     """Decoder initialization.
 
     Arguments:
-      labels (string): mapping from integers to characters.
-      blank_index (int, optional): index for the blank '_' character.
-        Defaults to 0.
-      space_index (int, optional): index for the space ' ' character.
+      labels: a string specifying the speech labels for the decoder to use.
+      blank_index: an integer specifying index for the blank character.
         Defaults to 28.
     """
     # e.g. labels = "[a-z]' _"
     self.labels = labels
+    self.blank_index = blank_index
     self.int_to_char = dict([(i, c) for (i, c) in enumerate(labels)])
 
   def convert_to_string(self, sequence):
     """Convert a sequence of indexes into corresponding string."""
     return ''.join([self.int_to_char[i] for i in sequence])
 
-  def wer(self, output, target):
+  def wer(self, decode, target):
     """Computes the Word Error Rate (WER).
 
     WER is defined as the edit distance between the two provided sentences after
     tokenizing to words.
 
     Args:
-      output: string of the decoded output.
-      target: a string for the true label.
+      decode: string of the decoded output.
+      target: a string for the ground truth label.
 
     Returns:
-      A float number for the WER of the current sentence pair.
+      A float number for the WER of the current decode-target pair.
     """
     # Map each word to a new char.
-    words = set(output.split() + target.split())
+    words = set(decode.split() + target.split())
     word2char = dict(zip(words, range(len(words))))
 
-    new_output = [chr(word2char[w]) for w in output.split()]
+    new_decode = [chr(word2char[w]) for w in decode.split()]
     new_target = [chr(word2char[w]) for w in target.split()]
 
-    return distance.edit_distance(''.join(new_output), ''.join(new_target))
+    return distance.edit_distance(''.join(new_decode), ''.join(new_target))
 
-  def cer(self, output, target):
+  def cer(self, decode, target):
     """Computes the Character Error Rate (CER).
 
-    CER is  defined as the edit distance between the given strings.
+    CER is defined as the edit distance between the two given strings.
 
     Args:
-      output: a string of the decoded output.
+      decode: a string of the decoded output.
       target: a string for the ground truth label.
 
     Returns:
       A float number denoting the CER for the current sentence pair.
     """
-    return distance.edit_distance(output, target)
+    return distance.edit_distance(decode, target)
 
   def decode(self, logits):
+    """Decode the best guess from logits using greedy algorithm."""
+    # Choose the class with maximimum probability.
     best = list(np.argmax(logits, axis=1))
-    merge = [k for k,g in itertools.groupby(best)]
-    return self.convert_to_string(merge)
+    # Merge repeated chars.
+    merge = [k for k, _ in itertools.groupby(best)]
+    # Remove the blank index in the decoded sequence.
+    merge_remove_blank = []
+    for k in merge:
+      if k != self.blank_index:
+        merge_remove_blank.append(k)
+
+    return self.convert_to_string(merge_remove_blank)

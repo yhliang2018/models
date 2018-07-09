@@ -19,12 +19,13 @@ from __future__ import print_function
 
 import math
 import random
-
+# pylint: disable=g-bad-import-order
 import numpy as np
-import scipy.io.wavfile as wavfile
 from six.moves import xrange  # pylint: disable=redefined-builtin
-import tensorflow as tf
 import soundfile
+import tensorflow as tf
+# pylint: enable=g-bad-import-order
+
 import data.featurizer as featurizer  # pylint: disable=g-bad-import-order
 
 
@@ -40,11 +41,9 @@ class AudioConfig(object):
 
     Args:
       sample_rate: an integer denoting the sample rate of the input waveform.
-      frame_length: an integer for the length of a spectrogram frame, in ms.
-      frame_step: an integer for the frame stride, in ms.
-      fft_length: an integer for the number of fft bins.
+      window_ms: an integer for the length of a spectrogram frame, in ms.
+      stride_ms: an integer for the frame stride, in ms.
       normalize: a boolean for whether apply normalization on the audio feature.
-      spect_type: a string for the type of spectrogram to be extracted.
     """
 
     self.sample_rate = sample_rate
@@ -95,16 +94,16 @@ def _normalize_audio_feature(audio_feature):
 
 
 def _preprocess_audio(audio_file_path, audio_featurizer, normalize):
-  """Load the audio file in memory and compute spectrogram feature."""
+  """Load the audio file and compute spectrogram feature."""
   data, _ = soundfile.read(audio_file_path)
   feature = featurizer.compute_spectrogram_feature(
-    data, audio_featurizer.sample_rate, audio_featurizer.stride_ms,
-    audio_featurizer.window_ms)
+      data, audio_featurizer.sample_rate, audio_featurizer.stride_ms,
+      audio_featurizer.window_ms)
   # Feature normalization
   if normalize:
     feature = _normalize_audio_feature(feature)
 
-  # Adding channel dimension for conv2D input.
+  # Adding Channel dimension for conv2D input.
   feature = np.expand_dims(feature, axis=2)
   return feature
 
@@ -115,7 +114,7 @@ def _preprocess_transcript(transcript, token_to_index):
 
 
 def _preprocess_data(file_path):
-  """Generate a list of waveform, transcript pair.
+  """Generate a list of waveform and transcript pair.
 
   Each dataset file contains three columns: "wav_filename", "wav_filesize",
   and "transcript". This function parses the csv file and stores each example
@@ -127,17 +126,18 @@ def _preprocess_data(file_path):
     file_path: a string specifying the csv file path for a dataset.
 
   Returns:
-     A list of tuples (audio_file_path, file_size, transcript) sorted by file
-     size.
+    A list of tuples (audio_file_path, file_size, transcript) sorted by file
+    size.
   """
-
+  tf.logging.info("Loading data set {}".format(file_path))
   with tf.gfile.Open(file_path, "r") as f:
     lines = f.read().splitlines()
   # Skip the csv header in lines[0].
   lines = lines[1:]
   lines = [line.split("\t") for line in lines]
-  # Sort input data by the length of waveform.
+  # Sort input data by the length of audio sequence.
   lines.sort(key=lambda item: int(item[1]))
+
   return [(line[0], line[1], line[2]) for line in lines]
 
 
@@ -168,22 +168,26 @@ class DeepSpeechDataset(object):
 
 
 def batch_wise_dataset_shuffle(entries, epoch_index, sortagrad, batch_size):
-  """Maybe shuffle the data entries (audio_file, file_size, transcript) batch-wise.
+  """Batch-wise shuffling of the data entries.
 
-     If epoch_index is 0 and sortagrad is true, we don't shuffle and
-     return entries in sorted file_size order. Otherwise, do batch_wise shuffling.
+  Each data entry is in the format of (audio_file, file_size, transcript).
+  If epoch_index is 0 and sortagrad is true, we don't perform shuffling and
+  return entries in sorted file_size order. Otherwise, do batch_wise shuffling.
 
   Args:
+    entries: a list of data entries.
+    epoch_index: an integer of epoch index
+    sortagrad: a boolean to control whether sorting the audio in the first
+      training epoch.
     batch_size: an integer for the batch size.
-    entries: a list of tuples (audio_file, file_size, transcript).
 
   Returns:
     The shuffled data entries.
   """
   shuffled_entries = []
   if epoch_index == 0 and sortagrad:
-     # No need to shuffle.
-     shuffled_entries = entries
+    # No need to shuffle.
+    shuffled_entries = entries
   else:
     # Shuffle entries batch-wise.
     max_buckets = int(math.ceil(len(entries) / batch_size))
@@ -215,6 +219,7 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
   text_featurizer = deep_speech_dataset.text_featurizer
 
   def _gen_data():
+    """Dataset generator function."""
     for i in xrange(len(data_entries)):
       audio_file, transcript = data_entries[i][0], data_entries[i][2]
       features = _preprocess_audio(
@@ -223,7 +228,10 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
           transcript, text_featurizer.token_to_index)
       input_length = [features.shape[0]]
       label_length = [len(labels)]
-      yield ({
+      # Yield a tuple of (features, labels) where features is a dict containing
+      # all info about the actual data features.
+      yield (
+          {
               "features": features,
               "input_length": input_length,
               "label_length": label_length
@@ -232,13 +240,15 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
 
   dataset = tf.data.Dataset.from_generator(
       _gen_data,
-      output_types=({
+      output_types=(
+          {
               "features": tf.float32,
               "input_length": tf.int32,
               "label_length": tf.int32
           },
           tf.int32),
-      output_shapes=({
+      output_shapes=(
+          {
               "features": tf.TensorShape([None, num_feature_bins, 1]),
               "input_length": tf.TensorShape([1]),
               "label_length": tf.TensorShape([1])
@@ -248,18 +258,19 @@ def input_fn(batch_size, deep_speech_dataset, repeat=1):
 
   # Repeat and batch the dataset
   dataset = dataset.repeat(repeat)
+
   # Padding the features to its max length dimensions.
   dataset = dataset.padded_batch(
       batch_size=batch_size,
-      padded_shapes=({
+      padded_shapes=(
+          {
               "features": tf.TensorShape([None, num_feature_bins, 1]),
               "input_length": tf.TensorShape([1]),
               "label_length": tf.TensorShape([1])
           },
-          tf.TensorShape([None]),
-      )
+          tf.TensorShape([None]))
   )
 
   # Prefetch to improve speed of input pipeline.
-  dataset = dataset.prefetch(1)
+  dataset = dataset.prefetch(buffer_size=tf.contrib.data.AUTOTUNE)
   return dataset

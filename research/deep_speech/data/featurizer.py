@@ -19,20 +19,19 @@ from __future__ import print_function
 
 import codecs
 import numpy as np
-from scipy import signal
 
 
 def compute_spectrogram_feature(samples, sample_rate, stride_ms=10.0,
                                 window_ms=20.0, max_freq=None, eps=1e-14):
   """Compute the spectrograms for the input samples(waveforms)."""
   if max_freq is None:
-      max_freq = sample_rate / 2
+    max_freq = sample_rate / 2
   if max_freq > sample_rate / 2:
-      raise ValueError("max_freq must not be greater than half of "
-                       "sample rate.")
+    raise ValueError("max_freq must not be greater than half of sample rate.")
+
   if stride_ms > window_ms:
-      raise ValueError("Stride size must not be greater than "
-                       "window size.")
+    raise ValueError("Stride size must not be greater than window size.")
+
   stride_size = int(0.001 * sample_rate * stride_ms)
   window_size = int(0.001 * sample_rate * window_ms)
 
